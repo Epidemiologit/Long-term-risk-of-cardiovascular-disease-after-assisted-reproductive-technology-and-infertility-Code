@@ -1,0 +1,125 @@
+#==============================================================================
+# FILENAME: 02_Figure_1.R
+# PROJECT:Cardiovascular diseases in women after fertility treatments
+#         and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to create the flow chart 
+#          Figure 1 in the manuscript.
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 25/06/2026 	
+
+# INPUT DATA: no imput data				
+# OUTPUT: 	01_Fig1
+# USAGE: Figure 1 (Flow chart for study population) in the manuscript
+
+# R VERSION: 4.3.1
+
+#Code for creating the flow chart "Figure 1"
+#==============================================================================
+
+# 0. Load necessary libraries for conversion
+library(DiagrammeR)
+library(DiagrammeRsvg)
+library(rsvg)
+library(magick)
+
+
+
+
+# 1. Create the diagram object
+graph <-grViz("
+digraph cohort_flowchart {
+
+  // Global node style
+  node [
+    shape = box,
+    style = \"rounded,filled\",
+    fontname = Helvetica,
+    fontsize = 12,
+    fontcolor = black,
+    color = gray40,
+    fillcolor = white,
+    penwidth = 2,
+    width = 3
+  ]
+
+  // Nodes with bold HTML labels
+  A [label = <
+    <b>Women with first birth<br/>1992–2002</b><br/>(N = 444,157)
+  >]
+
+  B1 [label = <
+    <b>Excluded:</b><br/>Used ART for later but not first birth<br/>(N = 2,214)
+  >]
+
+  B2 [label = <
+    <b>Excluded:</b><br/>Emigrated &lt;280 days before delivery<br/>(N = 10,162)
+  >]
+
+  B3 [label = <
+    <b>Excluded:</b><br/>Prevalent outcome cases<br/>(N = 2,372)
+  >]
+
+  B4 [label = <
+    <b>Excluded:</b><br/>Re-used unique identifiers<br/>(N = 48,653)
+  >]
+  
+
+  C [label = <
+    <b>Final analytical cohort</b><br/>(N = 380,756)
+  >, fillcolor = gray95]
+
+
+  D1 [label = <
+    <b>ART vs infertility </b><br/>ART: 10,923 | Infertility: 26,514
+  >, fillcolor = gray95]
+
+  D2 [label = <
+    <b>Infertility vs no infertility</b><br/>Infertility: 37,437 | no infertility: 343,319
+  >, fillcolor = gray95]
+
+  // Edges
+  A -> B1
+  B1 -> B2
+  B2 -> B3
+  B3 -> B4
+  B4 -> C
+  
+
+  C -> D1
+  C -> D2
+}
+")
+
+
+
+# 2. Generate the SVG
+svg_data <- export_svg(graph)
+
+# 3. Render to a temporary high-res PNG (2250 pixels wide = 7.5 inches at 300 DPI)
+tmp_png <- tempfile(fileext = ".png")
+rsvg_png(charToRaw(svg_data), file = tmp_png, width = 2250)
+
+# 4. Read that PNG into Magick
+img <- image_read(tmp_png)
+
+# 5. Final conversion to PLOS-compliant TIFF
+img_final <- img %>%
+  image_background("white") %>%  # Ensures no transparency
+  image_flatten()                # Merges all layers
+
+# 6. Write the final file
+image_write(
+  img_final, 
+  path = "Fig1.tif", 
+  format = "tiff", 
+  density = "300x300",
+  compression = "LZW"
+)
+
+# Clean up
+unlink(tmp_png)
+
+# Verify
+print(img_final)
