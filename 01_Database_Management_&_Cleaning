@@ -1,0 +1,1359 @@
+*---------CARDIOVASCULAR_RISK_IN_WOMEN_AFTER_ART_AND_INFERTILITY-------;
+*
+* Program: 01 Database management and cleaning ;
+* Author:   Angelo Mezzoiuso ;
+* Role: PhD student and corresponding author;
+* Supervisor: Sara Öberg;
+* Date of last update:   2026-06-25 ;
+* Purpose: Creates a study population of women having their first child
+* between 1992 and 2002
+* Input:   MBR (Medical Birth Register)
+*          NPR (National Patients Register)
+*          RCD (Register of the Causes of Death)
+*          LISA (The longitudinal integrated database for health insurance
+*                 and labour market studies)
+* Output:   List of first births between 1992 and 2002
+*           Occurrence of cardiovascular outcomes
+*           Information on the exposure to ART, ICSI, or occurrence
+*           of infertility
+*           Information on socioeconomic and migration
+*SAS Version:´9.4
+*
+*-----------------------------------------------------------------------;
+
+
+/*****************************       Database management and cleaning     ************************************/
+
+/*key steps concerning the study population
+	1. Select all births to nulliparous women
+	2. Preparation to allow the extraction of relevant data (from MBR, NPR, migration, death etc.) 
+	3  Data extraction from different registers
+    4. Join together all the different datasets
+    5. Compute the followup time
+    6. Retrieve information on reused id
+	7. Assign information from subsequent births 
+	8. Select study population for time-dependent exposure (first births and for unexposed later exposed also that birth)
+	9. Flag women that become exposed only in later births	(to allow their exclusion)
+   10. Exclusions
+   11. Variables formatting and dataset saving */
+
+
+/* 1. Select all births to nulliparous women in the study period */
+
+proc sql;
+	create table study_base_all as
+	select 		a.id_mat,
+                a.malder as Age label="Age",
+                a.MFODDATN label="mathernal birth", 
+				a.AR,
+				a.arbete as Job label="Job",
+				a.paritet_f,
+				a.b_date,
+				a.grdbs, 
+				a.Mfodland label="Maternal_Country",
+				a.mlangd label="Maternal_height",
+				a.mvikt label="Mother weight",
+                a.mviktfv label="Weight_delivery",
+				Rok1 label="smoke_during_pregn", 
+				a.bordf2,
+
+                /*Variables for infertility*/ 
+                a.OFRIBARN label="Infertility time to pregnancy",
+                a.OFRIABEF  label="Assisted reproduction", 
+                a.OFRIIATG label="Infertility no intervention", 
+                a.OFRIICSI  label="ICSI", 
+                a.OFRIKIRU label="Infertility surgery", 
+                a.OFRISTIM label="Infertility Ovulation stimulation",
+
+				/*Variables for maternal diseases*/
+				a.ASTMA,
+				a.DIABETES,
+				a.HYPERTON label="Hypertension",
+				a.NJURSJUK label="Chronic kidney disease",
+				a.SLE label="Lupus",
+				a.ULCOLIT label="Inflamatory bowel disease",
+				a.EPILEPSI label="Epilepsy"
+
+    from		repro.repro_mbr_base as a
+	where		a.ID_mat in	
+	(select 	b.ID_mat from repro.repro_mbr_base as b where paritet_f = 1 AND
+				ar GE 1992 AND ar LE 2002 AND (tid7dod NE '1' OR tiddodf NE '1' OR tidlevf EQ '' OR tsectio NE '1' ))
+	order by	id_mat, paritet_f, b_date;
+quit; 
+
+
+/* 2. Preparation to allow the extraction of relevant data. Here I remove all the deliveries with same parity */
+data study_base;
+   set study_base_all;
+   by id_mat paritet_f b_date;
+   length c_date 4.;
+   year=input(substr(b_date,1,4),4.);
+   month=input(substr(b_date,6,2),2.);
+   day=input(substr(b_date,9,2),2.);
+   Birth_date=mdy(month,day, year);
+   
+
+   if first.paritet_f;
+   if grdbs NE . 	then c_date = Birth_date - grdbs;
+				else c_date = Birth_date - 280;
+   if year le 2002 and year ge 1992;
+   
+
+   format c_date Birth_date yymmdd10.;
+   drop day month year;
+run;
+
+proc sort data = study_base; by id_mat b_date; run;
+
+
+
+
+/* 3. Data extraction from different registers */
+
+/* A: MBR_IVF */
+/*Extraction of women that accessed IVF */
+
+proc sql;
+create table 	study_ivf as
+	select		a.id_mat, 
+				a.b_date,
+				 input(substr(a.b_date,1,4),4.) as Year,
+		(case	when b.metod in ('', '00','01','02','06','11','13','15')	then 1
+																			else 2 end)	as art_clinic	length 3 label 'ART (clinic): (1) IVF (2) ICSI' 
+	from		study_base as a
+	inner join	repro.repro_mbr_ivf as b
+	on			a.ID_mat = b.ID_mat AND 
+				a.b_date = b.b_date
+				where calculated year le 2002 and calculated year ge 1992
+	order by 	ID_mat, b_date;
+quit;
+proc sort data = study_ivf nodupkey; by id_mat b_date; run; 
+
+
+/*Infertility from NPR*/
+/* B: NPR_DIA (infertility): people with a diagnosis of infertility*/
+
+proc sql;
+   create table study_dia as
+        select a.id_mat, 
+			   a.b_date,
+			   input(substr(a.b_date,1,4),4.) as Year_birth,
+			(case when b.dx in ("628", "N97", "Z350", "V23A") and b.icd ne 8 then 1 end) as Infertility_dia,
+			(case when b.dx in ("628", "N97", "Z350", "V23A") and b.icd ne 8 then dx end) as Infertility_code,
+			(case when b.dx in ("628", "N97", "Z350", "V23A") and b.icd ne 8 then DX_date end) as Infertility_date
+		from study_base as a
+	    inner join repro.Repro_npr_dia as b
+		on	a.ID_mat = b.ID
+		where calculated Infertility_dia eq 1 and calculated Infertility_date < a.b_date and
+		      calculated Year_birth ge 1992 and calculated Year_birth le 2002
+	    order by 	ID_mat, b_date, calculated Infertility_date;
+quit;
+
+
+proc sort data=study_dia nodupkey dupout=Dup_Study_dia; by ID_mat B_date; run;
+
+
+data study_dia1;
+   set study_dia;
+   by ID_mat b_date Infertility_date;
+
+   if first.ID_mat=1 then count_infertility=1;
+
+   if last.b_date=1;
+run;
+proc sort data=study_dia1; by ID_mat b_date Infertility_date descending count_infertility; run;
+
+data study_dia_final;
+   set study_dia1;
+   by ID_mat b_date Infertility_date descending count_infertility;
+   if first.ID_mat=1;
+   drop Year_birth infertility_code;
+run;
+
+
+
+/* C: NPR_OP (Procedures from NPR)*/
+proc sql;
+   create table npr_procedures as
+        select a.id_mat, 
+			   a.b_date,
+			   
+               input(substr(a.b_date,1,4),4.) as Year,
+			   input(substr(a.b_date,6,2),2.) as Month,
+               input(substr(a.b_date,9,2),2.) as day,
+			   mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+
+			   input(substr(b.Pro_date,1,4),4.) as Year_P,
+			   input(substr(b.Pro_date,6,2),2.) as Month_P,
+               input(substr(b.Pro_date,9,2),2.) as day_P,
+			   mdy( calculated Month_P, calculated day_P, calculated Year_P) as Procedure_date format ddmmyy10.,
+			(case when b.pro in ("LCA30", "DL002", "DL003", "DL001", "DL007") then b.pro end) as Procedure_code,
+			(case when b.pro in ("LCA30", "DL002", "DL003") then 1 end) as ART_pro,
+			(case when b.pro in ("DL001", "DL007") then 1 end) as ICSI_pro,
+			(case when b.pro in ("DL001", "DL007") then calculated Procedure_date end) as ICSI_pro_date
+		from study_base as a
+	    inner join repro.Repro_npr_op as b
+		on	a.ID_mat = b.ID
+		where calculated Year ge 1992 and calculated Year le 2002 and calculated Procedure_code ne " " and calculated Year_P le 2002 
+              and calculated Procedure_date le calculated Birth_date
+	    order by 	ID_mat, b_date, calculated Procedure_date;
+quit;
+
+/* Dataset ready for merging*/
+data npr_procedures_final;
+   set npr_procedures;
+   by ID_mat b_date Procedure_date;
+   if last.ID_mat=1;
+   drop Year month day Year_P Month_P Day_P ICSI_pro ICSI_pro_date Procedure_code Birth_date Procedure_date;
+run;
+
+
+
+/* D: Diagnoses of ART from NPR */
+proc sql;
+   create table NPR_art_dia as
+        select a.id_mat, 
+			   a.b_date,
+
+			   input(substr(a.b_date,1,4),4.) as Year,
+			   input(substr(a.b_date,6,2),2.) as Month,
+               input(substr(a.b_date,9,2),2.) as day,
+			   mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+
+			   input(substr(b.DX_date,1,4),4.) as Year_P,
+			   input(substr(b.DX_date,6,2),2.) as Month_P,
+               input(substr(b.DX_date,9,2),2.) as day_P,
+			   mdy( calculated Month_P, calculated day_P, calculated Year_P) as ART_date format ddmmyy10.,
+			   (case when b.dx like "Z312%" then b.dx end) as ART_code,
+			   (case when b.dx like "Z312%" then 1 end) as Art_dia
+		from study_base as a
+	    inner join repro.Repro_npr_dia as b
+		on	a.ID_mat = b.ID
+		where calculated Art_dia=1 and calculated Year le 2002 and calculated Year_P le 2002 and calculated ART_date le calculated Birth_date
+		order by 	ID_mat, b_date, calculated ART_date ;
+quit;
+
+data NPR_art_dia; /*Dataset ready for merging*/
+   set NPR_art_dia;
+    by ID_mat b_date ART_date;
+    if first.ID_mat=1;
+   drop year month day year_P month_P day_P ART_code Birth_date ART_date;
+run;
+
+
+
+
+
+/* E: Diagnosis of ICSI from NPR */
+proc sql;
+   create table NPR_ICSI_dia as
+        select a.id_mat, 
+			   a.b_date,
+
+			   input(substr(a.b_date,1,4),4.) as Year,
+			   input(substr(a.b_date,6,2),2.) as Month,
+               input(substr(a.b_date,9,2),2.) as day,
+			   mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+
+			   input(substr(b.DX_date,1,4),4.) as Year_P,
+			   input(substr(b.DX_date,6,2),2.) as Month_P,
+               input(substr(b.DX_date,9,2),2.) as day_P,
+			   mdy( calculated Month_P, calculated day_P, calculated Year_P) as ICSI_date format ddmmyy10.,
+			   (case when b.dx="Z312B" then 1 end) as ICSI_dia,
+			   (case when b.dx="Z312B" then b.dx end) as ICSI_code
+		from study_base as a
+	    inner join repro.Repro_npr_dia as b
+		on	a.ID_mat = b.ID
+		where calculated ICSI_dia=1 and calculated Year le 2002 and calculated Year_P le 2002 and calculated ICSI_date le calculated Birth_date
+		order by 	ID_mat, b_date, calculated ICSI_date ;
+quit;
+
+data NPR_ICSI_dia; /*Dataset ready for merging*/
+   set NPR_ICSI_dia;
+    by ID_mat b_date ICSI_date;
+    if last.B_date=1;
+   drop year month day year_P month_P day_P ICSI_code Birth_date ICSI_date;
+run;
+
+
+
+
+/* F: Education (LISA)*/
+
+proc sql;
+   create table Education as
+        select a.id_mat, 
+			   a.b_date,
+			   b.year label="year_edu",
+			   input(substr(a.b_date,1,4),4.) as Year_birth,
+               b.income_fam,
+			   b.edu
+		from study_base as a
+	    inner join Repro.Repro_lisa as b
+		on	a.ID_mat = b.ID
+		where b.Year le calculated Year_birth and calculated Year_birth ge 1992 and calculated Year_birth le 2002
+		order by 	ID_mat, b_date, b.year;
+quit;
+
+/*Every delivery was matched with education and income data more close in time and that appened before the birth.
+  Dataset ready for the merging*/
+data Education;
+   set Education;
+   by ID_mat b_date year;
+   if last.b_date=1;
+   drop Year_birth year;
+run;
+
+ 
+
+/* G: Socio-economic status*/ 
+
+proc sql;
+   create table Socio_Economic as
+        select a.id_mat, 
+			   a.b_date,
+			   b.year label="year_socio",
+			   input(substr(a.b_date,1,4),4.) as Year_birth,
+               b.SEI_cat,
+			   b.occupation
+		from study_base as a
+	    inner join Repro.Repro_fob as b
+		on	a.ID_mat = b.ID
+		where b.Year le calculated Year_birth and calculated Year_birth ge 1992 and calculated Year_birth le 2002
+		order by 	ID_mat, b_date, b.year;
+quit;
+
+/*Every delivery was matched with education and income data more close in time and that appened before the birth.
+  Dataset ready for the merging*/
+data Socio_Economic;
+   set Socio_Economic;
+   by ID_mat b_date year;
+   if last.b_date=1;
+   drop Year_birth year;
+run;
+
+
+
+/* H : Emigration*/
+proc sql;
+   create table Emigration as
+        select a.id_mat, 
+			   a.b_date,
+			   b.m_type,
+			   input(substr(b.m_date,1,4),4.) as m_year,
+               input(substr(b.m_date,6,2),2.) as m_month,
+               input(substr(b.m_date,9,2),2.) as m_day,
+			   mdy( calculated m_month, calculated m_day, calculated m_year) as Migr_date format ddmmyy10.,
+               
+			   input(substr(a.b_date,1,4),4.) as Year,
+			   input(substr(a.b_date,6,2),2.) as Month,
+               input(substr(a.b_date,9,2),2.) as day,
+			   mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+			   1 as Emigration
+		from study_base as a
+	    inner join Repro2.repro_migration as b
+		on	a.ID_mat = b.ID
+        where b.m_type="Utv" and calculated Migr_date ne . and calculated Migr_date ge calculated Birth_date
+		      and calculated year le 2002 and calculated year ge 1992
+        order by id_mat, b_date, Migr_date;
+quit;
+
+data Emigration;
+   set Emigration;
+   drop day month year m_day m_month m_year m_type;
+run;
+/*Dataset ready for the merge*/
+proc sort data=Emigration nodupkey dupout=duplicates; by id_mat; run;
+
+
+
+
+/* I: Immigration*/
+/*With this dataset we exclude 10,725 women that arrived in Sweden from 9 to 0 months before their delivery 
+  because we don't know if they had fertility treatments or if they had cardiovascular complications
+  during pregnancy while non in Sweden. Dataset ready for the merge*/
+
+proc sql;
+   create table Immigration as
+        select a.id_mat, 
+			   a.b_date,
+			   b.m_type,
+			   input(substr(b.m_date,1,4),4.) as m_year,
+               input(substr(b.m_date,6,2),2.) as m_month,
+               input(substr(b.m_date,9,2),2.) as m_day,
+			   mdy( calculated m_month, calculated m_day, calculated m_year) as Immigration_date format ddmmyy10.,
+               
+			   input(substr(a.b_date,1,4),4.) as Year,
+			   input(substr(a.b_date,6,2),2.) as Month,
+               input(substr(a.b_date,9,2),2.) as day,
+			   mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+			   calculated Birth_date-calculated Immigration_date as diff,
+			   1 as Exclusion_for_immigration
+		from study_base as a
+	    inner join Repro.repro_migration as b
+		on	a.ID_mat = b.ID
+        where b.m_type="Inv" and calculated diff ge 0 and calculated diff le 280 and calculated year le 2002
+              and calculated year ge 1992;
+quit;
+
+data Immigration;
+   set Immigration;
+   drop diff day month year m_day m_month m_year m_type Birth_date;
+run;
+proc sort data=Immigration nodupkey; by ID_mat b_date; run;
+
+
+
+
+/* L: Death*/
+/* Here there's a selection of women that died among the study participants 
+   (women that delivered their first child between 1992 and 2002)*/
+
+proc sql;
+   create table death as
+        select a.id_mat,
+               input(substr(a.b_date,1,4),4.) as Year, 
+		       a.b_date,
+			   b.ddx label="Cause of death",
+			   1 as Death,
+               . as D_diagnosis length=3,
+			   b.D_date
+		from study_base as a
+	    inner join Repro2.Repro_death_dia as b
+		on	a.ID_mat = b.ID 
+		where D_date ne " " and calculated year ge 1992 and calculated year le 2002
+        order by ID_mat, b_date ;
+quit;
+
+/*Here I group the diagnostic codes for the diseases of interest.
+  1) acute myocardial infarction
+  2) intracranial hemorrhage
+  3) cerebrovascular ischemic conditions
+  4) diabetes
+  5) kidney failure
+  6) aortic aneurysm and dissection
+  7) heart failure
+
+  8 and 9 are the two exclusions flag variables
+*/
+
+
+proc sql;
+   update death
+       set D_diagnosis=
+		case when  ddx like "I21%" or ddx like "410%" then 1 /* myocardial infarction */
+			 when ddx like "I60%" or ddx like "I61%" or ddx like "I62%" or ddx like "430%" or ddx like "431%" or ddx like "432%" then 2 /* Intracranial emorrhage*/
+             when ddx like "I63%" or ddx like "I65%" or ddx like "I66%" or ddx like "433%" or ddx like "434%" or ddx like "435%" then 3 /* Cerebrovascular ischemic conditions (Ischemic Stroke, TIA, and Large Artery Atherosclerosis)*/
+			 when ddx like "E11%" or ddx like "250%" then 4 /* diabetes */
+			 when ddx like "N18%" or ddx like "N19%" or ddx like "I12%" or ddx like "585%" or ddx like "403%" then 5 /* kidney failure */
+			 when ddx like "I71%" or ddx like "441" then 6 /* Aortic aneurysm and dissection */
+			 when ddx like "I50%" or ddx like "428" then 7 /*Heart failure*/
+
+			 when ddx like "Q874%" or ddx like "7598%"/*Marfan syndrome*/
+             or ddx like "Q796%" or ddx like "75683%" /*Ehlers-Danlos syndromes*/
+             or ddx like "Q878W" /*Loeys-Dietz syndrome*/
+             or ddx like "Q96%" or ddx like "7586%"  /*Turner's syndrome*/
+             or ddx like "M31%" or ddx like "446%" or ddx like "446%"  /*Giant cell arteritis and Takayasu syndrome*/
+             or ddx like "A51%" or ddx like "A52%" or ddx like "A53%" or ddx like "091%" or ddx like "092%" or ddx like "093%"
+             or ddx like "094%" or ddx like "095%" or ddx like "096%" /*Syphilis*/ then 8 /*Exclusion for Aortic aneurysm*/
+
+	         when ddx like "N11%" or ddx like "583W%" /*Nephritis*/ 
+		     or ddx like "Q61%" or ddx like "7531%"/*cystic kidney disease*/
+		     or ddx like "M30%" or ddx like "446%" /*Polyarteritis nodosa*/
+		     or ddx like "M310%" /*Goodpasture's syndrome*/
+             or ddx like "M311%"  /*Thrombotic microangiopathy*/ 
+		     or ddx like "M313%"   /*Wegener's granulomatosis */
+			 or ddx like "M316%" /*Microscopic polyangiitis*/
+			 or ddx like "M32%" or ddx like "710%"  /*Lupus*/
+			 or ddx like "N02B%" /*IgA nephropathy */ then 9 /*Exclusion for kidney failure*/
+
+			 when ddx like "Q20%" or ddx like "Q21%" or ddx like "Q22%" or ddx like "Q23%" or ddx like "Q24%" or ddx like "Q25%" or ddx like "Q26%" or ddx like "Q27%"
+			 or ddx like "Q28%" or ddx like "745%" or ddx like "746%" or ddx like "747%" /*Congenital heart malformations*/
+			 or ddx like "140%" or ddx like "141%" or ddx like "422%" /*Miocarditis*/
+			 or ddx like "I33%" or ddx like "I34%" or ddx like "I35%" or ddx like "I36%" or ddx like "I37%" or ddx like "I38%" or ddx like "I39%"
+             or ddx like "421%" or ddx like "424%" /*Endocarditis & valve diseases*/
+			 or ddx like "B20%" or ddx like "279%" /*HIV*/  then 10 /*Exclusion for heart failure*/
+
+				  
+       end;
+quit;
+
+
+proc sort data=death; by ID_mat D_diagnosis; run;
+
+/*Death1 is a file that marks every dead woman in the cohort and attributes a death date for censoring.
+  Dataset ready for the merge.*/
+data death1;
+   set death;
+   by ID_mat;
+   if first.ID_mat=1;
+   drop B_date year D_diagnosis ddx;
+run;
+proc sort data=death1; by ID_mat; run;
+
+/*After this, I create a dataset that has all the outcomes of interest and the 3 exclusion flag variables. 
+  First, I remove all the deaths that are not autcomes */
+data Death_cardio;
+   set death;
+   where D_diagnosis ne .;
+   drop year b_date death;
+run;
+proc sort data=Death_cardio nodupkey; by ID_mat D_diagnosis; run;
+
+proc transpose data=Death_cardio out=Deat_cardio2;
+   var D_diagnosis;
+   by ID_mat;
+run;
+
+/*Only conditions 1 to 7 are outcomes, 8 and 9 are just flag for ecluding patients*/
+data Deat_cardio3;
+   set Deat_cardio2;
+   array Death[4] COL1-COL4;
+   
+     Coronary_death = "0";
+     Hemorrhage_death = "0";
+     Stroke_death="0";
+     Diabetes_death = "0";
+     Kidney_death = "0";
+     Aortic_death = "0";
+     HF_death="0";
+     Aorta_Excl_Death = "0";
+     Kidney_Excl_Death = "0";
+     HF_Excl_Death="0";
+
+   do i=1 to 4;
+      if Death[i]=1 then Coronary_death="1";
+      if Death[i]=2 then Hemorrhage_death="1";
+      if Death[i]=3 then Stroke_death="1";
+      if Death[i]=4 then Diabetes_death="1";
+      if Death[i]=5 then Kidney_death="1";
+      if Death[i]=6 then Aortic_death="1";
+	  if Death[i]=7 then HF_death="1";
+      if Death[i]=8 then Aorta_Excl_Death= "1";
+      if Death[i]=9 then Kidney_Excl_Death="1";
+	  if Death[i]=10 then HF_Excl_Death="1";
+   end;
+
+   if Coronary_death="1" or Hemorrhage_death="1" or Stroke_death="1" or Diabetes_death="1"
+   or Kidney_death="1" or Aortic_death="1" or HF_death="1";
+
+   drop _NAME_ COL1 COL2 COL3 COL4 i;
+run;
+
+
+
+
+/* M: NPR_DIA (cardiovascular diagnoses)*/
+
+proc sql;
+   create table Cardio as
+   select a.id_mat, 
+          a.b_date,
+          a.grdbs,
+          b.dx,
+          . as Diagnosis length=3,
+          b.dx_date as Cardio_dia_date,
+          input(substr(a.B_date, 1, 4), best4.) as year
+   from study_base as a
+   inner join Repro2.Repro_npr_dia as b 
+   on a.ID_mat = b.ID 
+   where 
+      (
+          /* AMI  codes */
+          b.dx like "I21%" or b.dx like "410%" or
+
+          /* CIC (cerebrovascular ischemic conditions) and ICH */
+          b.dx like "I60%" or b.dx like "I61%" or b.dx like "I62%" or b.dx like "I63%" or
+          b.dx like "I65%" or b.dx like "I66%" or 
+          b.dx like "430%" or b.dx like "431%" or b.dx like "432%" or b.dx like "433%" or
+          b.dx like "434%" or b.dx like "435%" or
+
+          /* Diabetes */
+          b.dx like "E11%" or b.dx like "250%" or
+
+          /* Kidney failure */
+          b.dx like "N18%" or b.dx like "N19%" or b.dx like "I12%" or b.dx like "585%" or
+          b.dx like "403%" or
+
+          /* Aortic conditions */
+          b.dx like "I71%" or b.dx like "441%" or
+
+          /* Heart failure */
+          b.dx like "I50%" or b.dx like "428%" or
+
+          /* Marfan syndrome */
+          b.dx like "Q874%" or b.dx like "759W%" or
+
+          /* Ehlers-Danlos syndromes */
+          b.dx like "Q796%" or b.dx like "756W%" or
+
+          /* Loeys-Dietz syndrome */
+          b.dx like "Q878W%" or
+
+          /* Turner's syndrome */
+          b.dx like "Q96%" or b.dx like "758G%" or
+
+          /* Giant cell arteritis and Takayasu syndrome */
+          b.dx like "M31%" or b.dx like "446%" or
+
+          /* Syphilis */
+          b.dx like "A51%" or b.dx like "A52%" or b.dx like "A53%" or
+          b.dx like "091%" or b.dx like "092%" or b.dx like "093%" or
+          b.dx like "094%" or b.dx like "095%" or b.dx like "096%" or
+          (b.dx like "097%" and ICD = 8) or
+
+          /* Nephritis */
+          b.dx like "N11%" or b.dx like "583%" or
+
+          /* Cystic kidney disease */
+          b.dx like "Q61%" or b.dx like "753B%" or
+
+          /* Polyarteritis nodosa and others */
+          b.dx like "M30%" or
+
+          /* Goodpasture's syndrome */
+          b.dx like "M310%" or
+
+          /* Thrombotic microangiopathy */
+          b.dx like "M311%" or
+
+          /* Wegener's granulomatosis */
+          b.dx like "M313%" or
+
+          /* Microscopic polyangiitis */
+          b.dx like "M316%" or
+
+          /* Lupus */
+          b.dx like "M32%" or b.dx like "710%" or
+
+          /* IgA nephropathy */
+          b.dx like "N02B%" or
+
+          /* Congenital heart malformations */
+          b.dx like "Q20%" or b.dx like "Q21%" or b.dx like "Q22%" or
+          b.dx like "Q23%" or b.dx like "Q24%" or b.dx like "Q25%" or
+          b.dx like "Q26%" or b.dx like "Q27%" or b.dx like "Q28%" or
+          b.dx like "745%" or b.dx like "746%" or b.dx like "747%" or
+
+          /* Myocarditis */
+          b.dx like "140%" or b.dx like "141%" or b.dx like "422%" or
+
+          /* Endocarditis and valve diseases */
+          b.dx like "I33%" or b.dx like "I34%" or b.dx like "I35%" or
+          b.dx like "I36%" or b.dx like "I37%" or b.dx like "I38%" or
+          b.dx like "I39%" or b.dx like "421%" or b.dx like "424%" or
+
+          /* HIV */
+          b.dx like "B20%" or b.dx like "279%"
+      )
+      and calculated year between 1992 and 2002
+   order by ID_mat, b_date;
+quit;
+
+
+
+
+/* Here I classify the codes in the 7 diseases of interest*/
+proc sql;
+   update Cardio
+       set Diagnosis=
+       case when dx like "I21%" or dx like "410%" then 1
+			when dx like "I60%" or dx like "I61%" or dx like "I62%" or dx like "430%" or dx like "431%" or dx like "432%" then 2
+            when dx like "I63%" or dx like "I65%" or dx like "I66%" or dx like "433%" or dx like "434%" or dx like "435%" then 3
+            when dx like "E11%" or dx like "250%" then 4 /* diabetes */
+			when dx like "N18%" or dx like "N19%" or dx like "I12%" or dx like "585%" or dx like "403%" then 5 /* kidney failure */
+			when dx like "I71%" or dx like "441" then 6 /* Aortic aneurysm and dissection */	
+			when dx like "I50%" or dx like "428" then 7    /*Heart failure*/
+       end;
+quit;
+
+proc sort data=Cardio out= Cardio1 nodupkey;
+by ID_mat Diagnosis;
+run;
+
+proc freq data=Cardio1;
+  Table Diagnosis;
+run;
+
+proc sort data=Cardio; by id_mat Diagnosis Cardio_dia_date; run;
+
+/* Here I prepare the variables to be trasposed*/
+data Cardio1;
+   set Cardio;
+   by id_mat Diagnosis Cardio_dia_date;
+   if first.Diagnosis=1;
+   year=input(substr(Cardio_dia_date,1,4),4.);
+   month=input(substr(Cardio_dia_date,6,2),2.);
+   day=input(substr(Cardio_dia_date,9,2),2.);
+   Birth_date=mdy(month,day, year);
+
+   Dia_date=catx("/",Diagnosis,Birth_date);
+   drop dx;
+run;
+
+/* Here I transpose because I want a row for each subject, so I go from a narrow to broad table*/
+proc transpose data=Cardio1 out=Cardio2;
+     var Dia_date;
+	 by id_mat;
+run;
+
+
+
+/* Here I create a variable 0/1 + a variable date for each of the 2 diseases. 
+   The outcome of the study is the combination of these diagnosis and the diagnoses from the death register*/
+
+data Cardio3;
+   set Cardio2;
+  array Disease1[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease1[i],1,"/")= "1" then do;
+                                       Coronary_dia="1";
+						               Coronary_date=input(scan(Disease1[i],2,"/"),10.);
+  end;
+  end;
+  array Disease2[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease2[i],1,"/")= "2" then do;
+                                       Hemorrhage_dia="1";
+					                   Hemorrhage_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+  array Disease3[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease3[i],1,"/")= "3" then do;
+                                       Stroke_dia="1";
+					                   Stroke_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+  array Disease4[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease4[i],1,"/")= "4" then do;
+                                       Diabetes_dia="1";
+					                   Diabetes_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+  array Disease5[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease5[i],1,"/")= "5" then do;
+                                       Kidney_dia="1";
+					                   Kidney_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+  array Disease6[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease6[i],1,"/")= "6" then do;
+                                       Aortic_dia="1";
+					                   Aortic_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+  array Disease7[6] $90 COL1-COL6;
+  do i=1 to 6;
+  if scan(Disease7[i],1,"/")= "7" then do;
+                                       HF_dia="1";
+					                   HF_date=input(scan(Disease2[i],2,"/"),10.);
+  end;
+  end;
+ format Coronary_date Stroke_date Hemorrhage_date Diabetes_date Kidney_date Aortic_date HF_date ddmmyy10.;
+ drop COL: i _NAME_;
+run;
+proc sort data= Cardio3; by id_mat; run;
+
+/* Here I merge Cardio 3 with the exclusion criteria for Kidney failure and aortic aneurysm created in Cardio1*/
+
+proc sort data= Cardio out= Cardio_exclusions; by ID_mat descending dx; run;
+
+/* First, I created 3 exclusion variable that remain on accross the different observation on each subject*/
+data Cardio_exclusions1;
+set Cardio_exclusions;
+by ID_mat;
+
+if first.ID_mat then Aorta_Dia_Exc = 0; 
+if first.ID_mat then Kidney_Dia_Exc = 0; 
+if first.ID_mat then HF_Dia_Exc = 0; 
+
+
+if prxmatch("/Q874|759W|Q796|756W|Q878W|Q96|758G|M31|446|A51|A52|A53|091|092|093|094|095|096|097/", dx) then Aorta_Dia_Exc+1;
+if prxmatch("/N11|583W|Q6|753B|M30|M310|446|M311|M313|M316|M32|710|N02B/", dx) then Kidney_Dia_Exc+1;
+if prxmatch("/Q20|Q21|Q22|Q23|Q24|Q25|Q26|Q27|Q28|745|746|747|140|141|142|I33|I34|I35|I36|I37|I38|I39|421|424|B20|279/", dx) then HF_Dia_Exc+1;
+
+
+if Aorta_Dia_Exc ne . and Aorta_Dia_Exc > 0 then Aorta_Dia_Exc = 1;
+if Kidney_Dia_Exc ne . and Kidney_Dia_Exc> 0 then Kidney_Dia_Exc = 1;
+if HF_Dia_Exc ne . and HF_Dia_Exc> 0 then HF_Dia_Exc = 1;
+run;
+
+/* Then, I select only one row, the last*/
+data Cardio_exclusions2;
+   set Cardio_exclusions1;
+   by ID_mat;
+   if Last.ID_mat=1;
+run;
+
+/* Finally, I join everything*/
+proc sql;
+   create table Cardio4 as
+   select a.*, b.Aorta_Dia_Exc, b.Kidney_Dia_Exc, b.HF_Dia_Exc
+   from Cardio3 as a left join Cardio_exclusions2 as b
+   on a.ID_mat=b.ID_mat;
+quit;
+
+
+
+/* I need to find all the women with a diangosis of cardiovascular diseases before the date of delivery: these
+  women will be escluded. Therefore, I start from cardio, I convert dates in the date format and order*/
+
+proc sql;
+   create table Cardio_excl as
+   select ID_mat,
+          Diagnosis, 
+		  B_date,
+		  grdbs,
+          Cardio_dia_date,
+		  input(substr(Cardio_dia_date,1,4),4.) as m_year,
+          input(substr(Cardio_dia_date,6,2),2.) as m_month,
+          input(substr(Cardio_dia_date,9,2),2.) as m_day,
+		  mdy( calculated m_month, calculated m_day, calculated m_year) as Cardio_date format ddmmyy10.,
+
+		  input(substr(B_date,1,4),4.) as year,
+          input(substr(B_date,6,2),2.) as month,
+          input(substr(B_date,9,2),2.) as day,
+		  mdy( calculated month, calculated day, calculated year) as Birth_date format ddmmyy10.,
+		  case when grdbs NE . then calculated Birth_date - grdbs
+		       else calculated Birth_date - 280
+		  end as c_date format ddmmyy10.
+		  from cardio
+		  order by ID_mat, calculated Birth_date , calculated Cardio_date;
+quit;
+
+
+/* Here I take only people with diagnosis before the conception date*/
+data Cardio_excl2;
+   set Cardio_excl;
+   if Diagnosis ne .;
+   if Cardio_date < c_date ;
+   Exclusion_previous_disease=1;
+   keep ID_mat B_date Diagnosis Cardio_date Exclusion_previous_disease;
+run;
+
+proc sort data=Cardio_excl2 nodupkey; by ID_mat ; run; 
+
+
+
+/* Here I keep only the necessary variables and the dataset is ok for the merging */
+data Cardio_excl2;
+   set Cardio_excl2;
+   drop Cardio_date Diagnosis B_date;
+run;
+proc sort data=Cardio_excl2; by id_mat; run;
+
+
+
+
+
+
+/* 4. Join together all the different datasets
+      and combine the infertility variables to have
+      one variable for infertility, one for ART, and one for ICSI */
+
+data study_info; 
+merge study_base study_ivf Study_dia_final npr_procedures_final
+      Npr_art_dia Npr_icsi_dia Education Socio_Economic Emigration Immigration;
+by id_mat b_date; 
+
+
+if art_clinic in(1,2) then do;
+                        ART = 1;
+                        infertility=1;
+end; 
+					  else do;
+                        ART = 0;
+						infertility=0;
+end;
+if Art_dia=1          then do;
+                        ART=1;
+						infertility=1;
+end;
+if ICSI_dia=1         then do;
+                        ICSI=1;
+						ART=1;
+						infertility=1;
+end;
+if OFRIBARN ne . then infertility=1;
+if ofriabef = "1"     then do;
+                       ART=1;
+					   infertility=1;
+end;
+if ofriicsi="1"        then do;
+                        ICSI=1;
+						ART=1;
+						infertility=1;
+end;
+if ART_pro=1           then do;
+                        ART=1;
+						infertility=1;
+end;
+if Infertility_dia=1   then infertility=1;
+if OFRIABEF="1"        then do;
+                        ART=1;
+						infertility=1;
+end;
+if OFRIICSI="1"        then do;
+                       ICSI=1;
+					   ART=1;
+					   infertility=1;
+end;
+if OFRIBARN ne . then infertility=1;
+if art_clinic=2  then ICSI=1;
+
+
+/*Fertility Status*/
+   if infertility=0 then Fertility_status=0;
+   else if infertility=1 then Fertility_status=1;
+   if ART=1 then Fertility_status=2;
+
+
+/*BMI*/
+weight=input(MVIKT, 3.);
+height=input(MLANGD, 3.2);
+BMI=weight/(height)**2;
+
+/*Age in case of missings*/
+Year=input(substr(MFODDATN,1,4),4.);
+Month=input(substr(MFODDATN,6,2),2.);
+Maternal_Birthdate=mdy(Month,15,year);
+if Age eq . and Maternal_Birthdate ne . then Age=floor(yrdif(Maternal_Birthdate,Birth_date, "age"));
+run; 
+
+
+data study_info2;
+  merge study_info death1 Deat_cardio3 cardio4 Cardio_excl2;
+  by id_mat;
+run;
+
+proc sort data=study_info2; by id_mat b_date; run;
+
+
+
+
+
+/* 5. Compute the followup time*/
+
+data study_info3;
+   set study_info2;;
+   rename ID_mat=Id;
+ /*Gestational age*/
+   Gest_age=intck("day", c_date,  birth_date);
+   
+/*Preparing date variables*/
+   Death_year=input(substr(D_date,1,4),4.);
+   Death_month=input(substr(D_date,6,2),2.);
+   Death_day=input(substr(D_date,9,2),2.);
+   Death_date=mdy(Death_month,Death_day, Death_year);
+
+/* Define a constant for the recurring date */
+   %let cutoff_date = "31Dec2023"d;
+   
+    
+/*Censoring dates, event and follow-up*/
+
+   /* intracranial hemorrhage*/
+   censoring_hemorrhage=&cutoff_date;
+   if Death=1 then do;
+      if Death_date le &cutoff_date then censoring_hemorrhage=Death_date;
+   end;
+
+   if Hemorrhage_dia="1" then censoring_hemorrhage=Hemorrhage_date;
+   if Emigration=1 then do;
+      if Hemorrhage_date ne . then do;
+         if Migr_date < Hemorrhage_date then censoring_hemorrhage=Migr_date;
+	  end;
+   else censoring_hemorrhage=Migr_date;
+   end;
+
+   Hemorrhage_followup=intck("month",c_date,censoring_hemorrhage);
+
+   Hemorrhage_event= (Hemorrhage_death="1" or Hemorrhage_dia="1");
+   if Emigration=1 and ((Hemorrhage_dia="1" and Migr_date le Hemorrhage_date) or (Hemorrhage_dia="0" and Hemorrhage_death="1")) then  Hemorrhage_event=0;
+
+
+
+   /*cerebral ischemic conditions*/
+   censoring_stroke=&cutoff_date;
+   if Death=1 then do;
+      if Death_date le &cutoff_date then censoring_stroke=Death_date;
+   end;
+
+   if Stroke_dia="1" then censoring_stroke=Stroke_date;
+   if Emigration=1 then do;
+      if Stroke_date ne . then do;
+         if Migr_date < Stroke_date then censoring_stroke=Migr_date;
+	  end;
+   else if Emigration=1 and Stroke_date=. then censoring_stroke=Migr_date;
+   end;
+
+   Stroke_followup=intck("month",c_date,censoring_stroke);
+
+   Stroke_event= (Stroke_death="1" or Stroke_dia="1");
+   if Emigration=1 and ((Stroke_dia="1" and Migr_date le Stroke_date) or (Stroke_dia="0" and Stroke_death="1")) then  Stroke_event=0;
+
+
+
+
+   /*acute myocardial infarction*/
+   censoring_coronary=&cutoff_date;
+   if Death=1 then do;
+     if Death_date le &cutoff_date then censoring_coronary=Death_date;
+   end;
+
+   if Coronary_dia="1" then censoring_coronary=Coronary_date;
+   if Emigration=1 then do;
+      if Coronary_date ne . then do;
+         if Migr_date < Coronary_date then censoring_coronary=Migr_date;
+	  end;
+   else  censoring_coronary=Migr_date;
+   end;
+
+   Coronary_followup=intck("month",c_date,censoring_coronary);
+
+   Coronary_event= (Coronary_death="1" or Coronary_dia="1");
+   if Emigration=1 and ((Coronary_dia="1" and Migr_date le Coronary_date) or (Coronary_dia="0" and Coronary_death="1")) then  Coronary_event=0;
+
+
+
+
+
+   /*type 2 diabetes mellitus*/
+   censoring_diabetes=&cutoff_date;
+   if Death=1 then do;
+     if Death_date le &cutoff_date then censoring_diabetes=Death_date;
+   end;
+
+   if Diabetes_dia="1" then censoring_diabetes=Diabetes_date;
+   if Emigration=1 then do;
+      if Diabetes_date ne . then do;
+         if Migr_date < Diabetes_date then censoring_diabetes=Migr_date;
+	  end;
+   else censoring_diabetes=Migr_date;
+   end;
+
+   Diabetes_followup=intck("month",c_date,censoring_diabetes);
+
+   Diabetes_event = (Diabetes_death = "1" or Diabetes_dia = "1");
+   if Emigration = 1 and ((Diabetes_dia = "1" and Migr_date <= Diabetes_date) or (Diabetes_dia = "0" and Diabetes_death = "1")) then Diabetes_event = 0;
+
+
+   /*chronic kidney disease*/
+   censoring_kidney=&cutoff_date;
+   if Death=1 then do;
+     if Death_date le &cutoff_date then censoring_kidney=Death_date;
+   end;
+
+   if Kidney_dia="1" then censoring_kidney=Kidney_date;
+   if Emigration=1 then do;
+      if Kidney_date ne . then do;
+         if Migr_date < Kidney_date then censoring_kidney=Migr_date;
+	  end;
+   else censoring_kidney=Migr_date;
+   end;
+
+   Kidney_followup=intck("month",c_date,censoring_kidney);
+
+   Kidney_event= (Kidney_death="1" and Kidney_Excl_Death ne "1") or (Kidney_dia="1" and Kidney_Dia_Exc ne 1);
+   if Emigration=1 and (Kidney_dia="1" and Migr_date le Kidney_date) or (Kidney_dia="0" and Kidney_death="1")then Kidney_event=0;
+   
+
+
+
+
+   /*aortic aneurysm & dissection*/
+   censoring_aortic=&cutoff_date;
+   if Death=1 then do;
+     if Death_date le &cutoff_date then censoring_aortic=Death_date;
+   end;
+
+   if Aortic_dia = "1" then censoring_aortic = Aortic_date;
+   if Emigration = 1 then do;
+     if Aortic_date ne . then do;
+        if Migr_date < Aortic_date then censoring_aortic = Migr_date;
+     end;
+   else censoring_aortic = Migr_date; /* Handles case where Aortic_date is missing */
+   end;
+
+   Aortic_followup=intck("month",c_date,censoring_aortic);
+
+   Aortic_event = (Aortic_death = "1" and Aorta_Excl_Death ne "1") or (Aortic_dia = "1" and Aorta_Dia_Exc ne 1);
+   if Emigration = 1 and (Aortic_dia = "1" and Migr_date <= Aortic_date) or (Aortic_dia = "0" and Aortic_death = "1") then Aortic_event = 0;
+
+
+
+
+   /*heart failure*/
+   censoring_HF=&cutoff_date;
+   if Death=1 then do;
+     if Death_date le &cutoff_date then censoring_HF=Death_date;
+   end;
+
+   if HF_dia = "1" then censoring_HF = HF_date;
+   if Emigration = 1 then do;
+     if HF_date ne . then do;
+        if Migr_date < HF_date then censoring_HF = Migr_date;
+     end;
+   else censoring_HF = Migr_date; /* Handles case where Aortic_date is missing */
+   end;
+
+   HF_followup=intck("month",c_date,censoring_HF);
+
+   HF_event = (HF_death = "1" and HF_Excl_Death ne "1") or (HF_dia = "1" and HF_Dia_Exc ne 1);
+   if Emigration = 1 and (HF_dia = "1" and Migr_date <= HF_date) or (HF_dia = "0" and HF_death = "1") then HF_event = 0;
+
+
+
+   if ICSI ne 1 then ICSI=0;
+
+   label Id_mat="Id";
+   format censoring_coronary censoring_hemorrhage censoring_stroke censoring_diabetes censoring_kidney censoring_aortic censoring_HF Maternal_Birthdate Death_date ddmmyy10.;
+   drop Age GRDBS MLANGD MVIKT MVIKTFV BORDF2 OFRIBARN OFRIABEF OFRIIATG OFRIICSI OFRIKIRU OFRISTIM ART_pro Art_dia ICSI_dia weight height D_date 
+        Coronary_dia  Hemorrhage_dia  Stroke_dia Diabetes_dia Kidney_dia Aortic_dia art_clinic Death_year Death_month Death_day;
+run;
+
+
+  /*  6. Retrieve information on reused id */
+proc sql;
+	create table study_fam_all as 
+	select  * from (select	a.ID, a.id_reused, a.ID_mat, a.ID_pat, put(a.ID_mat,12.)||','||put(a.ID_pat,12.) as g0
+	from 		repro.repro_population as a
+	where  	a.ID in
+	(select b.ID_mat from study_base b))
+	order by g0; 
+quit;
+data flag_g0 unflag_g0;
+set study_fam_all;
+if 		ID_pat = .	then output unflag_g0;
+else if ID_mat = .	then output unflag_g0;
+					else output flag_g0;
+run;
+data study_fam;
+set flag_g0;
+by g0;
+run;
+proc sort; by Id;
+run;
+
+/* Merged to full cohort data based on maternal ID */
+
+data study_info4;
+   merge study_info3 (in=a)
+         study_fam (in=b);
+  by Id;
+  if a;
+run;
+	
+
+
+/* 7. Assign information from subsequent births */
+/* Assign prior and cumulative birth info (IVF use and N of births)*/
+data study_hist; 
+set study_info4; 
+by id b_date; 
+
+p_art = lag(art);
+if first.id then p_art = .;
+
+retain prior_art;
+if first.id then prior_art = 0;
+if p_art GT prior_art then prior_art = p_art; 
+
+run; 
+
+proc summary data = study_info4 nway noprint; 
+			 var art; 
+			 class id;
+			 output out = study_cum sum = n_art; 
+run; 
+
+data study_births;
+merge study_hist study_cum;
+by id; 
+length n_births 3.;
+
+n_births = _freq_; *total N of births;
+
+drop _type_ _freq_ p_art;
+
+run; 
+
+
+/* 8. Select study population for time-dependent exposure (first births and for unexposed later exposed also that birth)*/
+data study_all; 
+set study_births;
+by id b_date; 
+  
+if 	paritet_f GT 1 	then do; 
+					if art = 0 AND prior_art = 0 	 	then delete; *remove unexposed birth to previously unexposed;
+					else if prior_art = 1				then delete; *once exposed, remove all subsequent births;
+					end;
+run; 
+
+
+/* 9. Flag women that become exposed only in later births	(to allow their exclusion): 444,157*/
+data study_final; 
+set study_all;
+by id b_date; 
+
+if first.id AND last.id 	then excl = 0;
+									else excl = 1;
+run; 
+proc sort data=study_final; by id b_date excl; run;
+
+/* 444,157 women had their first birth between 1992 and 2002
+      |
+      |--------> 2,214 were excluded because underwent ART after their first birth
+      |
+   441,943 women with 1 birth in the same range and no later ART exposure
+      | 
+      |-------> 10,162 women excluded because immigrated less than 280 days before delivery
+      |
+      |-------> 2,372 prevalent cases excluded
+      | 
+      |-------> 48,653 reused cases
+      |
+    380,756 study cohort
+
+*/
+
+
+/* 10. Exclusions */
+
+/* A: I remove women with ART after the first delivery (2,214) and it becomes: 441,943 */
+
+data study_final Excluded;
+   set study_final;
+   if excl=0 then output study_final;
+   else if excl=1 then output Excluded;
+run;
+
+
+/* B: How many people are excluded for being exposed to ART after the first child?*/
+proc sort data= Excluded; by id b_date; run;
+data Excluded1; /*Answer: 2214 women that were exposed to ART after the first delivery*/
+   set Excluded;
+   by id B_date;
+   if first.id=1;
+run;
+proc freq data=Study_final;
+   table Exclusion_for_immigration Exclusion_previous_disease Exclusion_for_immigration*Exclusion_previous_disease;
+run;
+
+
+/* C: I exclude all the women that immigrated within 280 days from delivery (10,162)*/
+data Population_Cohort;
+   set Study_final;
+   if Exclusion_for_immigration ne 1;
+run;
+
+/* D: Then I exclude all women with previous cardiovascular diseases (2,372)*/
+data Population_Cohort;
+   set Population_Cohort;
+   if Exclusion_previous_disease ne 1;
+run;
+
+/* E: I exclude all the cases with reused personnummer(48,653) and 
+the total numbar of cases is 380756: The population study*/
+data Population_Cohort;
+   set Population_Cohort;
+   if id_reused ne 1;
+run;
+
+
+
+
+
+/* 11. Variables formatting and dataset saving */
+data clean.model1;
+   set Population_Cohort;
+
+   /*Maternal country*/
+   if mfodland="Uppgift Saknas" then Maternal_Country=" ";
+   else if mfodland="Sverige" then Maternal_Country="1";
+   else Maternal_Country="2";
+
+   /*Education*/
+   if edu in("1", "2") then Education ="1";
+   else if edu in ("3", "4") then Education="2";
+   else if edu in ("5", "6", "7") then Education="3";
+   else Education=" ";
+
+   /*Smoke*/
+   if ROK1="1" then Smoke="0";
+   else if ROK1 in ("2", "3") then Smoke="1";
+   else Smoke=" ";
+   
+   /*Entry_age (continuous maternal age at the moment of birth)*/
+   Myear=input(substr(MFODDATN,1,4),4.);
+   Mmonth=input(substr(MFODDATN,6,2) ,2.);
+   Mother_birth=mdy(Mmonth, 15, Myear);
+   Entry_age=floor(YRDIF(Mother_birth, c_date,"AGE"));
+   
+   /*age_c (caterorical maternal age at the moment of birth)*/
+   if Entry_age le 20 then age_c="1";
+   else if Entry_age ge 21 and Entry_age le 25 then age_c="2";
+   else if Entry_age ge 26 and Entry_age le 30 then age_c="3";
+   else age_c="4";
+
+   /*categorical bmi*/
+   if bmi ne . and bmi lt 18.5 then bmi_c="1";
+   else if bmi ge 18.5 and bmi lt 25 then bmi_c="2";
+   else if bmi ge 25 and bmi lt 30 then bmi_c="3";
+   else if bmi ge 30 then bmi_c="4";
+   else bmi_c=" ";
+   
+   /*categorical socioeconomic index*/
+   if SEI_cat in (" ", "99") then SEI=" ";
+   else if SEI_cat in ("11", "12" ) then SEI="1";
+   else if SEI_cat in ("21", "22", "33", "36", "91", "89") then SEI="2";
+   else if SEI_cat="46" then SEI="3";
+   else SEI="4";
+   
+   /*Comorbidities*/
+   if ASTMA in ("1", "2") then astma="1";
+   else astma="0";
+   if DIABETES in ("1", "2") then diabetes="1";
+   else diabetes="0";
+   if ULCOLIT in ("1", "2") then ulcolit="1";
+   else ulcolit="0";
+   if HYPERTON in ("1", "2") then hyperton="1";
+   else hyperton="0";
+   if SLE in ("1", "2") then sle="1";
+   else sle="0";
+   if NJURSJUK in ("1", "2") then njursjuk="1";
+   else njursjuk="0";
+   if EPILEPSI in ("1", "2") then epilepsi="1";
+   else epilepsi="0";
+
+   if Fertility_status ne " " and Maternal_Country ne " " and Smoke ne " " and bmi_c ne " " and age_c ne " " and AR ne .  then CCA="1";
+   
+   /*Variables for the 4 comparison groups*/
+   if Fertility_status=2 then Group_1="1"; /*ART vs no ART*/
+   else Group_1="0";
+
+   if Fertility_status=1 then Group_2="0"; /*ART vs Infertility*/
+   else if Fertility_status=2 then Group_2="1";
+   else Group_2=" ";
+
+   if Fertility_status=1 then Group_3="0"; /*ICSI vs Infertility*/
+   if ICSI=1 then Group_3="1";
+
+   if Fertility_status=0 then Group_4="0"; /*Infertility vs no Infertility*/
+   else  Group_4="1";
+    
+   /* categorical calendar year*/
+   if AR ge 1992 and AR le 1995 then AR_c="1";
+   else if AR ge 1996 and AR le 1998 then AR_c="2";
+   else if AR gt 1998 then AR_c="3";
+
+   /*Remove superfluous variables*/
+   drop mfoddatn PARITET_F B_date year infertility_dia count_infertility migr_date 
+        emigration immigration_date exclusion_for_immigration month Maternal_Birthdate id_reused ID_mat
+		ID_pat g0 prior_art n_art n_births excl Myear Mmonth Mother_birth rok1 infertility_date occupation
+        ICSI Exclusion_previous_disease;
+run;
