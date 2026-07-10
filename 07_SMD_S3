@@ -1,0 +1,455 @@
+
+#==============================================================================
+# FILENAME: 07_SMD_S3.R
+# PROJECT:Long-term risk of cardiovascular disease after assisted reproductive technology and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to compute the standardized
+#          mean difference for the study characteristics before and after the IPW
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 01/07/2026 	
+
+# INPUT DATA: g1_imputed_weighted.rds
+#             g1_winsorized.rds
+#	
+# OUTPUT: 07_S_Table_4_SMD_Results.xlsx		
+# USAGE: compute the SMD
+
+# R VERSION: 4.3.1
+
+#Code for computing the SMD
+#==============================================================================
+################################################
+# 1. Load dependencies
+################################################
+
+library(haven)
+library(cobalt)
+library(dplyr)
+library(purrr)
+library(cobalt)
+library(tidyr)
+library(forcats)
+library(tidyverse)
+library(writexl)
+
+# datasets
+df <- readRDS("Path/g1_imputed_weighted.rds")
+df1 <- readRDS("Path/g1_winsorized.rds")
+
+
+
+
+#########################################
+# 2. Define the variables for the analysis
+#########################################
+
+cont_vars <- c("Entry_age", "BMI", "AR")
+cat_vars  <- c("Maternal_Country", "Smoke", "Education", "SEI", 
+               "ASTMA", "ULCOLIT", "pooled_diseases")
+
+# Combine for iteration
+all_vars <- c(cont_vars, cat_vars)
+
+
+
+
+########################################################
+# 3. Helper Functions
+########################################################
+
+# Helper: weighted standard deviation
+wtd_sd <- function(x, w) {
+  xm <- weighted.mean(x, w, na.rm = TRUE)
+  var_w <- sum(w * (x - xm)^2, na.rm = TRUE) / sum(w, na.rm = TRUE)
+  return(sqrt(var_w))
+}
+
+# Helper: SMD for continuous variables
+smd_cont <- function(m1, m0, s1, s0) {
+  # Denominator: pooled standard deviation
+  den <- sqrt((s1^2 + s0^2) / 2)
+  ifelse(is.finite(den) & den > 0, (m1 - m0) / den, NA_real_)
+}
+
+# Helper: SMD for categorical variables 
+smd_prop <- function(p1, p0) {
+  den <- sqrt((p1*(1-p1) + p0*(1-p0))/2)
+  ifelse(is.finite(den) & den > 0, (p1 - p0)/den, NA_real_)
+}
+
+
+# Reference setting
+set_refs <- function(d){
+  d %>%
+    mutate(
+      Maternal_Country = fct_relevel(as.factor(Maternal_Country), as.character(sort(unique(Maternal_Country))[1])),
+      
+      Smoke            = fct_relevel(as.factor(Smoke), as.character(sort(unique(Smoke))[1])),
+      
+      SEI              = fct_relevel(as.factor(SEI), as.character(sort(unique(SEI))[1])),
+      
+      Education        = fct_relevel(as.factor(Education), as.character(sort(unique(Education))[1])),
+      
+      ASTMA         = fct_relevel(as.factor(ASTMA), "0"),
+      ULCOLIT       = fct_relevel(as.factor(ULCOLIT), "0"),
+      pooled_diseases = fct_relevel(as.factor(pooled_diseases), "0")
+    )
+}
+
+# Apply refs
+df <- map(df, set_refs)
+df1 <- map(df1, set_refs)
+
+
+
+
+###############################################
+# 4. Main calculation function 
+###############################################
+
+one_imp <- function(d){
+  grp <- sort(unique(d$Group_2))
+  nonart <- grp[1] 
+  art    <- grp[2] 
+  
+  map_dfr(all_vars, function(v){
+    
+    # for continuous variables
+    if(v %in% cont_vars){
+      
+      d %>%
+        filter(!is.na(.data[[v]]), !is.na(Group_2)) %>%
+        group_by(Group_2) %>%
+        summarise(
+          mean_val = weighted.mean(.data[[v]], sw, na.rm = TRUE),
+          sd_val   = wtd_sd(.data[[v]], sw), 
+          .groups = "drop"
+        ) %>%
+        pivot_wider(
+          names_from = Group_2, 
+          values_from = c(mean_val, sd_val),
+          names_prefix = "g" 
+        ) %>%
+        mutate(
+          variable = v,
+          level    = "Mean (SD)", # Label for the table
+          type     = "cont",      
+          
+          # Extract values 
+          mean_nonart = .data[[paste0("mean_val_g", nonart)]],
+          sd_nonart   = .data[[paste0("sd_val_g", nonart)]],
+          mean_art    = .data[[paste0("mean_val_g", art)]],
+          sd_art      = .data[[paste0("sd_val_g", art)]],
+          
+          # Calculate SMD using continuous formula
+          SMD = smd_cont(mean_art, mean_nonart, sd_art, sd_nonart)
+        ) %>%
+        select(variable, level, type, mean_nonart, sd_nonart, mean_art, sd_art, SMD)
+      
+      # Logic for categorical variables
+    } else {
+      
+      d %>%
+        filter(!is.na(.data[[v]]), !is.na(Group_2)) %>%
+        count(variable = v, level = .data[[v]], Group_2, wt = sw, name = "n_w") %>%
+        group_by(variable, level) %>%
+        complete(Group_2 = grp, fill = list(n_w = 0)) %>%
+        ungroup() %>%
+        group_by(variable, Group_2) %>%
+        mutate(pct_w = n_w / sum(n_w)) %>%
+        ungroup() %>%
+        pivot_wider(
+          names_from = Group_2, 
+          values_from = c(n_w, pct_w),
+          names_prefix = "g", 
+          values_fill = list(n_w = 0, pct_w = 0)
+        ) %>%
+        mutate(
+          type = "cat",
+          p_nonart = .data[[paste0("pct_w_g", nonart)]],
+          p_art    = .data[[paste0("pct_w_g", art)]],
+          
+          # Calculate SMD using the proportion formula
+          SMD_lvl  = smd_prop(p_art, p_nonart),
+          ref_lvl  = levels(d[[v]])[1],
+          SMD      = if_else(as.character(level) == ref_lvl, NA_real_, SMD_lvl),
+          
+          # Map categorical counts to generic columns to match continuous structure
+          # mean_nonart holds the COUNT, sd_nonart holds the PERCENTAGE
+          mean_nonart = .data[[paste0("n_w_g", nonart)]],
+          sd_nonart   = p_nonart, 
+          mean_art    = .data[[paste0("n_w_g", art)]],
+          sd_art      = p_art
+        ) %>%
+        select(variable, level, type, mean_nonart, sd_nonart, mean_art, sd_art, SMD)
+    }
+  })
+}
+
+
+
+############################################################
+# 5. Run the functions on the full weights
+############################################################
+
+# Run across imputations
+imp_all <- map(df, one_imp) %>%
+  bind_rows(.id = "imp") %>%
+  mutate(imp = as.integer(imp))
+
+# Pool results
+full_weighted <- imp_all %>%
+  group_by(variable, level, type) %>%
+  summarise(
+    # For Cat: Mean of Counts. For Cont: Mean of Means.
+    val_nonart_pooled = mean(mean_nonart, na.rm=TRUE), 
+    
+    # For Cat: SD of Counts (variation across imputations).
+    val_nonart_sd_imp = sd(mean_nonart, na.rm=TRUE),   
+    
+    # For Cat: Mean of %. For Cont: Mean of SDs.
+    second_stat_nonart = mean(sd_nonart, na.rm=TRUE), 
+    
+    # Same for ART group
+    val_art_pooled    = mean(mean_art, na.rm=TRUE),
+    val_art_sd_imp    = sd(mean_art, na.rm=TRUE),
+    second_stat_art   = mean(sd_art, na.rm=TRUE),
+    
+    SMD = mean(SMD, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Conditional formatting based on Type
+    `Non-ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_nonart_pooled, val_nonart_sd_imp, 100 * second_stat_nonart),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_nonart_pooled, second_stat_nonart)
+    ),
+    `ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_art_pooled, val_art_sd_imp, 100 * second_stat_art),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_art_pooled, second_stat_art)
+    )
+  ) %>%
+  transmute(
+    Variable = variable,
+    Level    = as.character(level),
+    `Non-ART`,
+    `ART`,
+    SMD
+  ) %>%
+  arrange(Variable, Level)
+
+# View Result
+print(full_weighted)
+
+
+
+
+############################################################
+# 6. Run the functions on the winsorized weights
+############################################################
+
+# Run across imputations
+imp_all <- map(df1, one_imp) %>%
+  bind_rows(.id = "imp") %>%
+  mutate(imp = as.integer(imp))
+
+# Pool results
+winsorized_tbl <- imp_all %>%
+  group_by(variable, level, type) %>%
+  summarise(
+    # For Cat: Mean of Counts. For Cont: Mean of Means.
+    val_nonart_pooled = mean(mean_nonart, na.rm=TRUE), 
+    
+    # For Cat: SD of Counts (variation across imputations).
+    val_nonart_sd_imp = sd(mean_nonart, na.rm=TRUE),   
+    
+    # For Cat: Mean of %. For Cont: Mean of SDs.
+    second_stat_nonart = mean(sd_nonart, na.rm=TRUE), 
+    
+    # Same for ART group
+    val_art_pooled    = mean(mean_art, na.rm=TRUE),
+    val_art_sd_imp    = sd(mean_art, na.rm=TRUE),
+    second_stat_art   = mean(sd_art, na.rm=TRUE),
+    
+    SMD = mean(SMD, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Conditional formatting based on type
+    `Non-ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_nonart_pooled, val_nonart_sd_imp, 100 * second_stat_nonart),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_nonart_pooled, second_stat_nonart)
+    ),
+    `ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_art_pooled, val_art_sd_imp, 100 * second_stat_art),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_art_pooled, second_stat_art)
+    )
+  ) %>%
+  transmute(
+    Variable = variable,
+    Level    = as.character(level),
+    `Non-ART`,
+    `ART`,
+    SMD
+  ) %>%
+  arrange(Variable, Level)
+
+# View result
+print(winsorized_tbl)
+
+
+
+
+#########################################################
+# 7. Unweighted Analysis (Same variables but no weights)
+# #######################################################
+
+# Helper: standard SMD for continuous (Unweighted)
+smd_cont_unw <- function(m1, m0, s1, s0) {
+  den <- sqrt((s1^2 + s0^2) / 2)
+  ifelse(is.finite(den) & den > 0, (m1 - m0) / den, NA_real_)
+}
+
+# Helper: standard SMD for proportions (Unweighted)
+smd_prop_unw <- function(p1, p0) {
+  den <- sqrt((p1*(1-p1) + p0*(1-p0))/2)
+  ifelse(is.finite(den) & den > 0, (p1 - p0)/den, NA_real_)
+}
+
+one_imp_unw <- function(d){
+  grp <- sort(unique(d$Group_2))
+  nonart <- grp[1]; art <- grp[2]
+  
+  map_dfr(all_vars, function(v){
+    
+    # for continuous variables (Unweighted)
+    if(v %in% cont_vars){
+      
+      d %>%
+        filter(!is.na(.data[[v]]), !is.na(Group_2)) %>%
+        group_by(Group_2) %>%
+        summarise(
+          # Standard mean and SD
+          mean_val = mean(.data[[v]], na.rm = TRUE),
+          sd_val   = sd(.data[[v]], na.rm = TRUE), 
+          .groups = "drop"
+        ) %>%
+        pivot_wider(
+          names_from = Group_2, 
+          values_from = c(mean_val, sd_val),
+          names_prefix = "g"
+        ) %>%
+        mutate(
+          variable = v,
+          level    = "Mean (SD)",
+          type     = "cont",
+          
+          mean_nonart = .data[[paste0("mean_val_g", nonart)]],
+          sd_nonart   = .data[[paste0("sd_val_g", nonart)]],
+          mean_art    = .data[[paste0("mean_val_g", art)]],
+          sd_art      = .data[[paste0("sd_val_g", art)]],
+          
+          SMD = smd_cont_unw(mean_art, mean_nonart, sd_art, sd_nonart)
+        ) %>%
+        select(variable, level, type, mean_nonart, sd_nonart, mean_art, sd_art, SMD)
+      
+      # Logic for categorical variables (Unweighted) 
+    } else {
+      
+      d %>%
+        filter(!is.na(.data[[v]]), !is.na(Group_2)) %>%
+        # Standard count (NO wt argument)
+        count(variable = v, level = .data[[v]], Group_2, name = "n") %>%
+        group_by(variable, level) %>%
+        complete(Group_2 = grp, fill = list(n = 0)) %>%
+        ungroup() %>%
+        group_by(variable, Group_2) %>%
+        mutate(pct = n / sum(n)) %>%
+        ungroup() %>%
+        pivot_wider(
+          names_from = Group_2, 
+          values_from = c(n, pct),
+          names_prefix = "g", 
+          values_fill = list(n = 0, pct = 0)
+        ) %>%
+        mutate(
+          type = "cat",
+          p_nonart = .data[[paste0("pct_g", nonart)]],
+          p_art    = .data[[paste0("pct_g", art)]],
+          
+          SMD_lvl  = smd_prop_unw(p_art, p_nonart),
+          ref_lvl  = levels(d[[v]])[1],
+          SMD      = if_else(as.character(level) == ref_lvl, NA_real_, SMD_lvl),
+          
+          # Mapping to generic columns
+          mean_nonart = .data[[paste0("n_g", nonart)]],
+          sd_nonart   = p_nonart, 
+          mean_art    = .data[[paste0("n_g", art)]],
+          sd_art      = p_art
+        ) %>%
+        select(variable, level, type, mean_nonart, sd_nonart, mean_art, sd_art, SMD)
+    }
+  })
+}
+
+# Run across imputations
+imp_all_unw <- map(df, one_imp_unw) %>%
+  bind_rows(.id = "imp") %>%
+  mutate(imp = as.integer(imp))
+
+# Pool results (Unweighted)
+final_tbl_unweighted <- imp_all_unw %>%
+  group_by(variable, level, type) %>%
+  summarise(
+    val_nonart_pooled = mean(mean_nonart, na.rm=TRUE), 
+    val_nonart_sd_imp = sd(mean_nonart, na.rm=TRUE),   
+    second_stat_nonart = mean(sd_nonart, na.rm=TRUE), 
+    
+    val_art_pooled    = mean(mean_art, na.rm=TRUE),
+    val_art_sd_imp    = sd(mean_art, na.rm=TRUE),
+    second_stat_art   = mean(sd_art, na.rm=TRUE),
+    
+    SMD = mean(SMD, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `Non-ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_nonart_pooled, val_nonart_sd_imp, 100 * second_stat_nonart),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_nonart_pooled, second_stat_nonart)
+    ),
+    `ART` = case_when(
+      type == "cat" ~ sprintf("%.0f ± %.0f (%.1f%%)", val_art_pooled, val_art_sd_imp, 100 * second_stat_art),
+      type == "cont" ~ sprintf("%.2f (%.2f)", val_art_pooled, second_stat_art)
+    )
+  ) %>%
+  transmute(
+    Variable = variable,
+    Level    = as.character(level),
+    `Non-ART`,
+    `ART`,
+    SMD
+  ) %>%
+  arrange(Variable, Level)
+
+# View Unweighted Result
+final_tbl_unweighted
+
+rm(df, df1, imp_all, imp_all_unw)
+gc() 
+
+
+
+###########################
+# 8. Save in Excel file
+# #########################
+
+# Put everything in a single file
+sheets <- list(
+  "Weighted population" = full_weighted,
+  "Unweighted population" = final_tbl_unweighted,
+  "Winsorized weighted population"= winsorized_tbl
+)
+
+# Export to a single Excel file
+write_xlsx(sheets, path = "07_S_Table_4_SMD_Results.xlsx")
