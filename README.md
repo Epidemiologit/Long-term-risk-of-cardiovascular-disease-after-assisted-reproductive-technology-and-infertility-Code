@@ -11,7 +11,7 @@ For a proper replication of the analysis pipeline, scripts should be executed in
 
 ## File Structure & Pipeline
 
-* **01_Database management**  
+* **01_Database management and cleaning**  
   Extracts the raw registry data, cleans, filters, and creates the final study cohort file containing exposure and outcome variables.
   
 * **02_Figure_1**  
@@ -36,16 +36,16 @@ For a proper replication of the analysis pipeline, scripts should be executed in
 * **06_IPW_checks_S3_to_S4**  
   Performs quality checks on the weights and produces Supplementary Figure S3 (distribution of full vs. winsorized IPW) and Supplementary Figure S4 (Mirror graph).
   
-* **07_SMD_S3_table**  
+* **07_SMD_S3**  
   Calculates the Standardized Mean Difference for unweighted, full IPW-weighted, and winsorized IPW-weighted variables to evaluate weighting performance. Statistics are exported to Excel to populate Table S3 in the Supplement.
   
 * **08_Survival_analysis**  
   Performs the core survival analyses and exports the resulting statistics to an Excel file to populate Supplemental Tables S5 to S7.
   
-* **09_Figures_2_to_3_and_S5_to_S7**  
+* **09_Figures_2_to_3_and_S5_to_S7_Fig**  
   Applies Rubin's rules to pool the multiply-imputed datasets, then creates and assembles multi-panel graphs for Figures 2 and 3 in the main manuscript, as well as Figures S5 to S7 in the Supplement.
   
-* **10_ICSI_Fig_S8**  
+* **10_Figures_ICSI_S8**  
   Applies Rubin's rules to pool the multiply-imputed datasets and assembles the multi-panel graph for the ICSI vs. Infertility comparison (Supplementary Figure S8).
 
 ## R Packages Used
