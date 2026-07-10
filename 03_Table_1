@@ -1,0 +1,227 @@
+
+#==============================================================================
+# FILENAME: 03_Table_1.R
+# PROJECT:Cardiovascular diseases in women after fertility treatments
+#         and infertility.
+# PURPOSE: the purpose of this file code is to create the Table 1 
+#          descriptive statistics for the manuscript.
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 20/01/2026 	
+
+# INPUT DATA: model1				
+# OUTPUT: 	no output
+# USAGE: computing the descriptive statistics for Table 1
+
+# R VERSION: 4.3.1
+
+#Code for creating the descriptive statistics for Table 1
+#==============================================================================
+
+##########################################
+# 0. LOADING DEPENDENCIES
+##########################################
+library(janitor)
+library(haven)
+library(tidyverse)
+library(rlang)
+library(forcats)
+library(survival)
+
+###############################################
+# 1. IMPORTING the dataset
+###############################################
+
+model1 <- read_sas("Path...", NULL)
+
+
+###############################################
+# 2. RECODE VARIABLES
+###############################################
+
+#Recode country of origin into a 3 levels variable
+model1_clean <- model1 %>%
+  mutate(
+    Country = MFODLAND %>% 
+      as.character() %>% 
+      fct_collapse(
+        "Sweden"="Sverige",
+        "Other European countries"=c("Europa", "Övriga Norden")
+      ) %>%
+      fct_other(
+        keep = c("Sweden", "Other European countries"),
+        other_level ="Non-European countries"
+      )
+  )
+
+
+
+model1_clean <- model1_clean %>% 
+  filter(AR > 1991)
+
+model1_clean <- model1_clean %>%
+  mutate(
+    # Create the categorical variable AR1 based on the numeric year AR
+    AR1 = case_when(
+      AR <= 1995 ~ 1,
+      AR >= 1996 & AR <= 1998 ~ 2,
+      AR > 1998 ~ 3,
+      TRUE ~ NA_real_  # Accounts for any empty or missing years
+    ),
+    # Convert the resulting 1, 2, 3 into a factor 
+    AR1 = as.factor(AR1)
+  )
+
+
+
+
+#################################################
+# 3. DESCRIPTIVE STATISTICS FOR CATEGORICAL VAR
+#################################################
+
+# 3.1 Function that take 3 arguments (data, row_var, and col_var) and performs a cross tabulation
+get_stats <- function(data, row_var, col_var = "Fertility_status") {
+  data %>%
+    # .data[[ ]] evaluates the string as a column name
+    tabyl(.data[[row_var]], .data[[col_var]]) %>%
+    adorn_percentages("col") %>%
+    adorn_pct_formatting(digits = 1) %>%
+    adorn_ns()
+}
+
+
+# 3.2 Create a list of categorical variables
+cat_var <- c("Country", "AR1", "Education", "Smoke", "bmi_c", "SEI","ASTMA",
+             "DIABETES", "HYPERTON", "NJURSJUK", "SLE", "ULCOLIT", "EPILEPSI")
+
+# 3.3 Apply the function get_stats to the dataset to obtain the statistics
+all_tables <- cat_var %>%
+  set_names() %>% 
+  map(~ get_stats(model1_clean, .x))
+
+
+# 3.4 iwalk uses .x for the table and .y for the name of the variable
+all_tables %>% 
+  iwalk(~ {
+    cat("\n--- Crosstab for:", .y, "---\n") # Prints a clear header
+    print(.x)
+    cat("\n") # Adds a line break
+  })
+
+###############################################
+# 4. DESCRIPTIVE STATISTICS FOR CONTINUOUS VAR
+###############################################
+
+# 4.1 Functions for mean and std
+get_mean <- function(x) x %>% mean(na.rm = TRUE) %>% round(2)
+get_sd <- function(x) x %>% sd(na.rm = TRUE) %>% round(2)
+
+# 4.2 Applying functions to BMI and Entry_age
+model1_clean %>%
+  group_by(Fertility_status) %>%
+  summarize(across(
+    .cols = c(BMI, Entry_age),
+    .fns = list(
+      mean = \(x) round(mean(x, na.rm = TRUE), 2),
+      sd   = \(x) round(sd(x, na.rm = TRUE), 2)
+    ),
+    .names = "{.col}_{.fn}"
+  ))
+
+
+# 4.3 Crosstabulation by Fertility status
+model1_clean %>%
+  # Group by the status (columns)
+  group_by(Fertility_status) %>%
+  
+  # Calculate the stats
+  summarize(across(c(BMI, Entry_age), list(mean = \(x) mean(x, na.rm = TRUE), sd = \(x) sd(x, na.rm = TRUE)))) %>%
+  
+  # Flip the table so variables are rows
+  pivot_longer(cols = -Fertility_status) %>%
+  pivot_wider(names_from = Fertility_status, values_from = value)
+
+
+
+
+
+###############################################################
+# 5. MEDIAN FOLLOWUP FOR THE GENERAL POPULATION AND ART GROUP
+###############################################################
+
+
+# 5.1 Subsetting  
+# Filter model1 to keep only rows where Group_1 is not missing
+model1_clean <- subset(model1, !is.na(Group_1) & Group_1 != "")
+
+# 5.2 Apply censoring logic to the subsetted data
+model1_clean$Coronary_years <- round(model1_clean$Coronary_followup / 12, 1)
+model1_clean$Coronary_event_censored <- ifelse(model1_clean$Coronary_years > 30, 0, model1_clean$Coronary_event)
+model1_clean$Coronary_years_censored  <- pmin(model1_clean$Coronary_years, 30)
+
+# 5.3 Create the Reverse Event indicator for Reverse Kaplan-Meier
+# (1 = censored/reached end of study, 0 = had coronary event)
+model1_clean$reverse_event <- 1 - model1_clean$Coronary_event_censored
+
+# 5.4 Calculate Follow-up (Reverse KM)
+# Total Cohort
+followup_fit_total <- survfit(Surv(Coronary_years_censored, reverse_event) ~ 1, 
+                              data = model1_clean)
+
+# 5.5 By Group (using Group_1 as the strata)
+followup_fit_group <- survfit(Surv(Coronary_years_censored, reverse_event) ~ Group_1, 
+                              data = model1_clean)
+
+# 5.6 Extract Stats (Median, Q1, Q3)
+stats_total <- quantile(followup_fit_total, probs = c(0.25, 0.5, 0.75))
+stats_group <- quantile(followup_fit_group, probs = c(0.25, 0.5, 0.75))
+
+# 5.7 Display results
+cat("--- Summary for Non-Missing Group_1 ---\n")
+print(stats_total)
+cat("\n--- Breakdown by Group_1 ---\n")
+print(stats_group)
+
+
+
+
+
+#################################################
+# 6. MEDIAN FOLLOWUP FOR THE INFERTILITY GROUP 
+#################################################
+
+# 6.1 Subsetting and Data Prep 
+# Filter model1 to keep only rows where Group_1 is not missing
+
+model1_clean2 <- subset(model1, !is.na(Group_1) & Group_4 != "")
+
+# 6.2 Apply the censoring logic to the subsetted data
+model1_clean2$Coronary_years <- round(model1_clean2$Coronary_followup / 12, 1)
+model1_clean2$Coronary_event_censored <- ifelse(model1_clean2$Coronary_years > 30, 0, model1_clean2$Coronary_event)
+model1_clean2$Coronary_years_censored  <- pmin(model1_clean2$Coronary_years, 30)
+
+
+# 6.3 Create the Reverse Event indicator for Reverse Kaplan-Meier
+# (1 = censored/reached end of study, 0 = had coronary event)
+model1_clean2$reverse_event <- 1 - model1_clean2$Coronary_event_censored
+
+
+# 6.4 Calculate Follow-up
+# Total Cohort
+followup_fit_total2 <- survfit(Surv(Coronary_years_censored, reverse_event) ~ 1, 
+                               data = model1_clean2)
+
+# 6.5
+followup_fit_group2 <- survfit(Surv(Coronary_years_censored, reverse_event) ~ Group_4, 
+                               data = model1_clean2)
+
+# 6.6 Extract Stats (Median, Q1, Q3)
+stats_total2 <- quantile(followup_fit_total2, probs = c(0.25, 0.5, 0.75))
+stats_group2 <- quantile(followup_fit_group2, probs = c(0.25, 0.5, 0.75))
+
+# 6.7 Display results
+cat("--- Summary for Non-Missing Group_4 ---\n")
+print(stats_total2)
+cat("\n--- Breakdown by Group_4 ---\n")
+print(stats_group2)
