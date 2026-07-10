@@ -1,0 +1,256 @@
+
+#==============================================================================
+# FILENAME: 05_IPW_modelling.R
+# PROJECT:Long-term risk of cardiovascular disease after assisted reproductive technology and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to create the IPW for each comparison group
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 01/07/2026 	
+
+# INPUT DATA: dlist_g1_preIPW
+#             dlist_g2_preIPW
+#             dlist_g3_preIPW
+#     
+# OUTPUT: 	Non-winsorized IPW datasets:
+#           dlist_w1
+#           dlist_w2
+#           dlist_w3
+#           dlist_w4
+#
+#           Winsorized IPW datasets:
+#           winsorized_w1
+#           winsorized_w2
+#           winsorized_w3
+#           winsorized_w4
+#
+# USAGE: create the IPW for each comparison group
+
+# R VERSION: 4.3.1
+
+#Code for creating the IPW for each comparison group
+#==============================================================================
+
+
+##########################################
+# 0. LOADING DEPENDENCIES
+##########################################
+library(haven)
+library(WeightIt)
+library(splines)
+
+
+
+###############################################
+# 1. IMPORTING the dataset
+###############################################
+dlist_g1 <- readRDS("dlist_g1_preIPW.rds")
+dlist_g2 <- readRDS("dlist_g2_preIPW.rds")
+dlist_g3 <- readRDS("dlist_g3_preIPW.rds")
+
+
+
+
+###################################################################
+# 2. CREATE STABILIZED IPW FOR COMPARISON GROUP: ART vs Infertility
+###################################################################
+
+make_ipw_g1 <- function(df, trunc = NULL) {
+  g <- as.integer(as.character(df$Group_2)=="1")  # the ref is ART
+  if (length(unique(g)) != 2) stop("Group_2 has only one level in this dataset")
+  
+  fit_den <- glm(g ~ Maternal_Country + Smoke + ns(BMI, df=3) + ns(AR, df=3) + ns(Entry_age, df=3) 
+                 + SEI + Education + ASTMA + ULCOLIT + pooled_diseases,
+                 family = binomial(link= "logit"), data = df)
+  den_1 <- predict(fit_den, type = "response")
+  
+  eps <- 1e-6
+  den_1 <- pmin(pmax(den_1, eps), 1 - eps)  # numerical guard
+  
+  n  <- mean(g == 1)
+  sw <- ifelse(g == 1, n/den_1, (1 - n)/(1 - den_1))
+  
+  if (!is.null(trunc)) {                     
+    q  <- quantile(sw, probs = trunc, na.rm = TRUE)
+    sw <- pmin(pmax(sw, q[1]), q[2])
+  }
+  
+  # Save the Propensity score to the dataframe
+  df$ps <- den_1
+  
+  df$sw <- sw
+  df
+}
+# Compute weights for each imputed dataset 
+dlist_w1 <- lapply(dlist_g1, make_ipw_g1, trunc = NULL)
+winsorized_w1 <- lapply(dlist_g1, make_ipw_g1, trunc = c(0.01, 0.99))
+
+
+
+
+#######################################################################################
+# 3. CREATE STABILIZED IPW FOR COMPARISON FULLY-ADJUSTED INFERTILITY VS NO INFERTILITY
+#######################################################################################
+
+make_ipw_g2 <- function(df, trunc = NULL) {
+  g <- as.integer(as.character(df$Group_4)=="1")  #the ref is infertility
+  if (length(unique(g)) != 2) stop("Group_4 has only one level in this dataset")
+  
+  
+  fit_den <- glm(g ~ Maternal_Country + Smoke + ns(BMI, df=3) + ns(AR, df=3) + ns(Entry_age, df=3) 
+                 + SEI + Education + ASTMA + ULCOLIT + pooled_diseases,
+                 family = binomial(link= "logit"), data = df)
+  den_2 <- predict(fit_den, type = "response")
+  
+  eps <- 1e-6
+  den_2 <- pmin(pmax(den_2, eps), 1 - eps)
+  
+  n <- mean(g == 1)
+  sw <- ifelse(g == 1, n/den_2, (1 - n)/(1 - den_2))
+  
+  if (!is.null(trunc)) {
+    q <- quantile(sw, probs = trunc, na.rm = TRUE)
+    sw <- pmin(pmax(sw, q[1]), q[2])
+  }
+  
+  df$sw <- sw
+  df
+}
+
+# Compute weights for each imputed dataset on the comparison group Infertility vs no Infertility fully-adjusted
+dlist_w2 <- lapply(dlist_g2, make_ipw_g2, trunc = NULL)
+winsorized_w2 <- lapply(dlist_g2, make_ipw_g2, trunc = c(0.01, 0.99))
+
+
+
+
+##########################################################################################
+# 4. CREATE STABILIZED IPW FOR COMPARISON GROUP AGE-ADJUSTED INFERTILITY VS NO INFERTILITY
+##########################################################################################
+
+make_ipw_g3 <- function(df, trunc = NULL) {
+  g <- as.integer(as.character(df$Group_4)=="1")
+  if (length(unique(g)) != 2) stop("Group_4 has only one level in this dataset")
+  
+  
+  fit_den <- glm(g ~ ns(Entry_age, df=3), family = binomial(link= "logit"), data = df)
+  den_3 <- predict(fit_den, type = "response")
+  
+  eps <- 1e-6
+  den_3 <- pmin(pmax(den_3, eps), 1 - eps)
+  
+  n <- mean(g == 1)
+  sw <- ifelse(g == 1, n/den_3, (1 - n)/(1 - den_3))
+  
+  if (!is.null(trunc)) {
+    q <- quantile(sw, probs = trunc, na.rm = TRUE)
+    sw <- pmin(pmax(sw, q[1]), q[2])
+  }
+  
+  df$sw <- sw
+  df
+}
+
+# Compute weights for each imputed dataset on Group_4 Infertility vs no Infertility age-adjusted
+dlist_w3 <- lapply(dlist_g2, make_ipw_g3, trunc = NULL)
+winsorized_w3 <- lapply(dlist_g2, make_ipw_g3, trunc = c(0.01, 0.99))
+
+
+
+
+#####################################################################################
+# 5. CREATE STABILIZED IPW FOR comparison GROUP FOR SUPPLEMENTAL ICSI VS INFERTILITY  
+#####################################################################################
+
+make_ipw_g4 <- function(df, trunc = NULL) {
+  g <- as.integer(as.character(df$Group_3)=="1") 
+  if (length(unique(g)) != 2) stop("Group_3 has only one level in this dataset")
+  
+  
+  fit_den <- glm(g ~ Maternal_Country + Smoke + ns(BMI, df=3) + ns(AR, df=3) + ns(Entry_age, df=3) 
+                 + SEI + Education + ASTMA + ULCOLIT + pooled_diseases,
+                 family = binomial(link= "logit"), data = df)
+  den_4 <- predict(fit_den, type = "response")
+  
+  eps <- 1e-6
+  den_4 <- pmin(pmax(den_4, eps), 1 - eps)
+  
+  n <- mean(g == 1)
+  sw <- ifelse(g == 1, n/den_4, (1 - n)/(1 - den_4))
+  
+  if (!is.null(trunc)) {
+    q <- quantile(sw, probs = trunc, na.rm = TRUE)
+    sw <- pmin(pmax(sw, q[1]), q[2])
+  }
+  
+  df$sw <- sw
+  df
+}
+
+# Compute weights for each imputed dataset (Group ICSI vs Infertility)
+dlist_w4 <- lapply(dlist_g3, make_ipw_g4, trunc = NULL)
+winsorized_w4 <- lapply(dlist_g3, make_ipw_g4, trunc = c(0.01, 0.99))
+
+
+
+
+################################################################
+# 6. Function to censor follow-up at tau years for all outcomes
+################################################################
+
+# 6.1 Comparison groups ART vs Infertility and Infertility vs 
+# no infertility will be all censored at 30 years while the one with ICSI
+# vs Infertility is censored at 25 years
+
+add_censor <- function(df, tau = 30) {
+  # Define event/followup pairs
+  outcomes <- c("Coronary", "Stroke", "Diabetes", "HF",
+                "Hemorrhage", "Kidney", "Aortic")
+  
+  for (o in outcomes) {
+    event_var    <- paste0(o, "_event")
+    follow_var   <- paste0(o, "_followup")
+    event_cens   <- paste0(o, "_event_cens")
+    time_cens    <- paste0(o, "_time_cens")
+    
+    # Apply censoring
+    df[[event_cens]] <- ifelse(df[[follow_var]] > tau, 0, df[[event_var]])
+    df[[time_cens]]  <- pmin(df[[follow_var]], tau)
+  }
+  
+  return(df)
+}
+
+# 6.2 Apply to all imputed datasets with weights
+
+#ART vs Infertility
+dlist_w1 <- lapply(dlist_w1, add_censor, tau = 30)
+winsorized_w1 <- lapply(winsorized_w1, add_censor, tau = 30)
+
+#Infertility vs no Infertility fully-adjusted
+dlist_w2 <- lapply(dlist_w2, add_censor, tau = 30)
+winsorized_w2 <- lapply(winsorized_w2, add_censor, tau = 30)
+
+#Infertility vs no Infertility age-adjusted
+dlist_w3 <- lapply(dlist_w3, add_censor, tau = 30)
+winsorized_w3 <- lapply(winsorized_w3, add_censor, tau = 30)
+
+#ICSI vs Infertility
+dlist_w4 <- lapply(dlist_w4, add_censor, tau = 25)
+winsorized_w4 <- lapply(winsorized_w4, add_censor, tau = 25)
+
+
+##############################
+# 7. Save the datasets
+##############################
+
+saveRDS(dlist_w1, "g1_imputed_weighted.rds")
+saveRDS(winsorized_w1, "g1_winsorized.rds")
+
+saveRDS(dlist_w2, "g2_imputed_weighted.rds")
+saveRDS(winsorized_w2, "g2_winsorized.rds")
+
+saveRDS(dlist_w3, "g3_imputed_weighted.rds")
+saveRDS(winsorized_w3, "g3_winsorized.rds")
+saveRDS(dlist_w4, "g4_imputed_weighted.rds")
+saveRDS(winsorized_w4, "g4_winsorized.rds")
