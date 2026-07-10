@@ -1,0 +1,179 @@
+
+#==============================================================================
+# FILENAME: 06_IPW_checks_S3_to_S4.R
+# PROJECT:Long-term risk of cardiovascular disease after assisted reproductive technology and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to perform quality checks on IPW and PS
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 01/07/2026 	
+
+# INPUT DATA: g1_imputed_weighted.rds
+#             g1_winsorized.rds
+#     
+# OUTPUT: S3 Fig
+#         S4 Fig
+
+# USAGE: Perform quality checks on PS ans IPW
+
+# R VERSION: 4.3.1
+
+
+#==============================================================================
+
+##########################################
+# 0. load dependencies
+##########################################
+
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+
+
+###############################################
+# 1. Import the dataset
+###############################################
+
+df <- readRDS("Path/g1_imputed_weighted.rds")
+df1 <- readRDS("Path/g1_winsorized.rds")
+
+
+###############################################
+# 2. S3 Fig
+###############################################
+
+# 2.1 Calculate the averaged weight across all 20 imputations for the full set of weights
+all_sw_matrix <- sapply(df, function(x) x$sw)
+avg_sw_vector <- rowMeans(all_sw_matrix)
+plot_data_avg <- data.frame(avg_sw = avg_sw_vector)
+
+# 2.2 Calculate the safety markers
+p99_avg <- quantile(avg_sw_vector, 0.99, na.rm = TRUE)
+max_avg <- max(avg_sw_vector, na.rm = TRUE)
+
+# 2.3 Calculate shared limits based on the wider (non-winsorized) data
+x_min <- min(avg_sw_vector, na.rm = TRUE)
+x_max <- max(avg_sw_vector, na.rm = TRUE)
+shared_x_limits <- c(x_min, x_max)
+
+# 2.4 Plot A: full weights
+a <- ggplot(plot_data_avg, aes(x = avg_sw)) +
+  geom_histogram(bins = 100, fill = "steelblue", color = "white") +
+  
+  scale_x_log10(limits = shared_x_limits, breaks = c(0.1, 0.5, 1, 2, 5, 10, 20, 50)) + 
+  scale_y_continuous(limits = c(0, 3000)) +
+  geom_vline(xintercept = p99_avg, linetype = "dashed", color = "violetred", linewidth = 1) +
+  annotate("text", x = p99_avg, y = Inf, label = " 99th Percentile", 
+           color = "violetred", angle = 90, vjust = 1.5, hjust = 1.1) +
+  labs(subtitle = paste0("Mean maximum weight: ", round(max_avg, 2)),
+       x = "IPW (Log10 scale)",
+       y = "Frequency Count",
+       tag = "A") +
+  theme_classic() +
+  theme(plot.tag = element_text(face = "bold"))
+
+
+
+# 2.5 Calculate the averaged weight across all 20 imputations for the full set of weights
+wins_sw_matrix <- sapply(df1, function(x) x$sw)
+wins_vector <- rowMeans(wins_sw_matrix)
+wins_avg <- data.frame(avg_sw = wins_vector)
+
+# 2.6 Calculate the safety markers
+p99_wins <- quantile(wins_vector, 0.99, na.rm = TRUE)
+max_wins <- max(wins_vector, na.rm = TRUE)
+
+# 2.7 Calculate shared limits based on the wider (non-winsorized) data
+wins_min <- min(wins_vector, na.rm = TRUE)
+wins_max <- max(wins_vector, na.rm = TRUE)
+shared_wins_limits <- c(wins_min, wins_max)
+
+
+
+#2.8 Plot B: winsorized weights
+b <- ggplot(wins_avg, aes(x = avg_sw)) +
+  geom_histogram(bins = 100, fill = "steelblue", color = "white") +
+ 
+  scale_x_log10(limits = shared_wins_limits, breaks = c(0.1, 0.5, 1, 2, 5, 10, 20, 50)) + 
+  scale_y_continuous(limits = c(0, 3000)) +
+  geom_vline(xintercept = p99_wins, linetype = "dashed", color = "violetred", linewidth = 1) +
+  annotate("text", x = p99_wins, y = Inf, label = " 99th Percentile", 
+           color = "violetred", angle = 90, vjust = 1.5, hjust = 1.1) +
+  labs(subtitle = paste0("Mean maximum weight: ", round(max_wins, 2)),
+       x = "IPW (Log10 scale)",
+       y = "Frequency Count",
+       tag = "B") +
+  theme_classic() +
+  theme(plot.tag = element_text(face = "bold"))
+
+# 2.9 Assembly
+adj_theme <- theme(
+  axis.title = element_text(size = 8),
+  axis.text = element_text(size = 7),
+  plot.margin = margin(5, 5, 5, 5)
+)
+
+combined_body <- plot_grid(
+  a + adj_theme, 
+  b + adj_theme,
+  ncol = 1, 
+  align = 'v'
+)
+
+S3_Fig <- plot_grid(
+  ggdraw() + draw_label("Comparison of Full vs. Winsorized IPW Distribution", fontface = "bold", size = 10), 
+  combined_body,
+  ncol = 1,
+  rel_heights = c(0.05, 0.95)
+)
+
+print(S3_Fig)
+
+#2.10 Save
+jpeg("S3_Fig.jpg", width = 17, height = 14, units = "in", res = 600)
+grid::grid.draw(S3_Fig)
+dev.off()
+
+
+
+###############################################
+# 3. S4 Fig
+###############################################
+
+# 3.1 Mirror Plot (S4 Fig)
+#Extract and average the Propensity Scores 
+all_ps_matrix <- do.call(cbind, lapply(df, function(x) x$ps))
+
+avg_ps_vector <- rowMeans(all_ps_matrix, na.rm = TRUE)
+
+
+# 3.2 Create the data frame for the plot
+plot_data_ps <- data.frame(
+  ps = avg_ps_vector,
+  Group = as.factor(df[[1]]$Group_2)
+)
+
+
+# 3.3 Create the mirror plot with labels
+c <- ggplot(plot_data_ps, aes(x = ps, fill = Group)) +
+  # Upper half (Group 1)
+  geom_density(data = subset(plot_data_ps, Group == 1), aes(y = ..density..)) +
+  # Lower half (Group 0) - negative density to flip it
+  geom_density(data = subset(plot_data_ps, Group == 0), aes(y = -..density..)) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("0" = "#999999", "1" = "#E69F00"), 
+                    labels = c("Infertility", "ART")) +
+  labs(title = "Pooled propensity score overlap ",
+       subtitle = "Averaged across 20 imputations",
+       x = "Average propensity score",
+       y = "Density (mirror plot)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+print(c)
+
+# 3.4. save
+jpeg("S4_Fig.jpg", width = 16, height = 14, units = "in", res = 600)
+grid::grid.draw(c)
+dev.off()
+
