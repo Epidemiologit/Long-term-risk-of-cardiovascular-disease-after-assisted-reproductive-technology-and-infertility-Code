@@ -1,0 +1,333 @@
+
+#==============================================================================
+# FILENAME: 08_Survival_analysis.R
+# PROJECT:Cardiovascular diseases in women after fertility treatments
+#         and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to compute the survival analysis
+#          weighted by IPW for the 4 comparison group in all the 7 outcomes.
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 02/07/2026 	
+
+# INPUT DATA: Non-winsorized datasets:
+#             g1_imputed_weighted.rds
+#             g2_imputed_weighted.rds
+#             g3_imputed_weighted.rds
+#             g4_imputed_weighted.rds
+#
+#             Winsorized datasets:
+#             g1_winsorized.rds
+#             g2_winsorized.rds
+#             g3_winsorized.rds
+#             g4_winsorized.rds
+#             
+# OUTPUT: pooled_g1.rds
+#         pooled_g2.rds
+#         pooled_g3.rds
+#         pooled_g4.rds
+# USAGE: Survival analysis by comparison group and outcome
+
+# R VERSION: 4.3.1
+
+# This code takes multiply imputed winsorized and unwinsorized datasets
+# calculates the risks tables, pulls the risk together with the Rubin rule and
+# outputs the risks in an excel table called 08_S_Table_5_to_7_Risks.csv
+#==============================================================================
+
+##########################################
+# 0. LOADING DEPENDENCIES
+##########################################
+library(haven)
+library(tidyverse)
+library(survival)
+library(adjustedCurves)
+library(pammtools)
+library(writexl)
+
+###############################################
+# 1. IMPORTING the dataset
+###############################################
+dlist_w1 <- readRDS("g1_imputed_weighted.rds")
+winsorized_w1 <- readRDS("g1_winsorized.rds")
+
+dlist_w2 <- readRDS("g2_imputed_weighted.rds")
+winsorized_w2 <- readRDS("g2_winsorized.rds")
+
+dlist_w3 <- readRDS("g3_imputed_weighted.rds")
+winsorized_w3 <- readRDS("g3_winsorized.rds")
+
+dlist_w4 <- readRDS("g4_imputed_weighted.rds")
+winsorized_w4 <- readRDS("g4_winsorized.rds")
+
+
+
+
+#####################################
+# 2. DEFINE THE EFFECT ESTIMATES
+#####################################
+#' @description
+#' The function get_risk_metrics_delta calculates R, RD, and RR
+#' at a single specific time point using the delta method for 
+#' confidence intervals.
+#' 
+#' @param fit A \code{survfit} object 
+#' @param tau numeric, times points (for comparison 1,2,3 is 10,20,30; for the 4 is 10,20,25)
+#' @param outcome_name character, names of the diseases
+#' 
+#' @return A data frame containing point estimates and 95% CIs for Risks, RD, and RR.
+#' 
+get_risk_metrics_delta <- function(fit, 
+                                   tau, 
+                                   outcome_name) {
+  s <- summary(fit, times = tau, extend = TRUE)
+  S0 <- s$surv[1]; S1 <- s$surv[2]
+  seS0 <- s$std.err[1]; seS1 <- s$std.err[2]
+  
+  # Risks
+  R0 <- 1 - S0
+  R1 <- 1 - S1
+  
+  # Risk CIs (delta method, SE same as survival, clamp to [0,1])
+  clamp01 <- function(x) pmax(0, pmin(1, x))
+  ci_R0 <- clamp01(c(R0 - 1.96 * seS0, R0 + 1.96 * seS0))
+  ci_R1 <- clamp01(c(R1 - 1.96 * seS1, R1 + 1.96 * seS1))
+  
+  # Risk difference + CI
+  RD <- R1 - R0
+  se_RD <- sqrt(seS0^2 + seS1^2)   
+  ci_RD <- c(RD - 1.96 * se_RD, RD + 1.96 * se_RD)
+  
+  # Risk ratio + CI (delta method on log scale)
+  eps <- 1e-12
+  R0p <- pmax(R0, eps); R1p <- pmax(R1, eps)
+  RR <- R1p / R0p
+  se_logRR <- sqrt((seS1^2) / (R1p^2) + (seS0^2) / (R0p^2))
+  ci_RR <- exp(log(RR) + c(-1, 1) * 1.96 * se_logRR)
+  
+  data.frame(
+    outcome = outcome_name,
+    tau = tau,
+    Risk0 = R0, CI_R0_low = ci_R0[1], CI_R0_high = ci_R0[2],
+    Risk1 = R1, CI_R1_low = ci_R1[1], CI_R1_high = ci_R1[2],
+    RD = RD, CI_RD_low = ci_RD[1], CI_RD_high = ci_RD[2],
+    RR = RR, CI_RR_low = ci_RR[1], CI_RR_high = ci_RR[2]
+  )
+}
+
+
+#####################################
+# 3. SURVIVAL ANALYZER
+#####################################
+#' @description 
+#' Runs across multiple outcomes and imputed datasets to 
+#' compute weighted Kaplan-Meier models and extract effect estimates.
+#' 
+#' @param dlist list of imputed dataframes
+#' @param group_var  variable defining the comparison group (eg: Group_1)
+#' @param outcome name of the diseases studied
+#' @param taus time points
+#' 
+#' @return A named list of lists containing survival estimates for each outcome.
+#' 
+analyze_delta <- function(dlist, group_var, 
+                          outcomes = c("Coronary","Stroke","Diabetes","HF","Hemorrhage","Kidney","Aortic"),
+                          taus = c(10,20,30)) {
+  res <- list()
+  
+  for (o in outcomes) {
+    message("Processing Outcome: ", o, " for ", group_var)
+    
+    tvar <- paste0(o, "_time_cens")
+    evar <- paste0(o, "_event_cens")
+    fml <- as.formula(paste0("Surv(", tvar, ",", evar, ") ~ ", group_var))
+    
+    res[[o]] <- lapply(seq_along(dlist), function(i) {
+      dat_i <- dlist[[i]]
+      
+      # Check if the weights column actually exists in this specific imputation
+      if (!"sw" %in% names(dat_i)) {
+        warning(paste("Dataset index", i, "is missing the 'sw' column. Skipping."))
+        return(NULL)
+      }
+      
+      dat_i[[group_var]] <- factor(dat_i[[group_var]], levels = c("0","1"))
+      
+      if (length(na.omit(unique(dat_i[[group_var]]))) < 2) return(NULL)
+      
+      fit <- survival::survfit(fml, data = dat_i, weights = sw, conf.type = "plain")
+      
+      do.call(rbind, lapply(taus, function(tau) {
+        get_risk_metrics_delta(fit, tau, o)
+      }))
+    })
+  }
+  return(res)
+}
+
+# Define shared outcomes
+my_outcomes <- c("Coronary","Stroke","Diabetes","HF","Hemorrhage","Kidney","Aortic")
+
+# Execute all comparisons 
+#ART vs Infertility
+res_all_w1 <- analyze_delta(dlist_w1, "Group_2", my_outcomes, c(10,20,30))
+res_winsorized_1 <- analyze_delta(winsorized_w1, "Group_2", my_outcomes, c(10,20,30))
+
+#Infertility vs no Infertility fully-adjusted
+res_all_w2 <- analyze_delta(dlist_w2, "Group_4", my_outcomes, c(10,20,30))
+res_winsorized_2 <- analyze_delta(winsorized_w2, "Group_4", my_outcomes, c(10,20,30))
+
+#Infertility vs no Infertility age-adjusted
+res_all_w3 <- analyze_delta(dlist_w3, "Group_4", my_outcomes, c(10,20,30)) 
+res_winsorized_3 <- analyze_delta(winsorized_w3, "Group_4", my_outcomes, c(10,20,30))
+
+#ICSI vs Infertility (Supplemental analysis)
+res_all_w4 <- analyze_delta(dlist_w4, "Group_3", my_outcomes, c(10,20,25))
+res_winsorized_4 <- analyze_delta(winsorized_w4, "Group_3", my_outcomes, c(10,20,25))
+
+
+
+
+
+###########################################
+# 4. POOLING RESULTS 
+###########################################
+#' @description 
+#' Combines estimates from multiple imputations to 
+#' produce a single pooled estimate and variance that
+#'  accounts for imputation uncertainty via Rubin's Rules.
+#'
+#' @param res_list_outcome A list of data frames from \code{analyze_delta} for one outcome.
+#' @param scale_to_percentage if true, multiplies RD by 100.
+#'
+#' @return A data frame of pooled estimates with 95% confidence intervals
+
+# 4.1 MI pooling 
+.pool_scalar <- function(q, u){
+  m <- length(q)
+  qbar <- mean(q)
+  ubar <- mean(u)
+  b    <- if (m > 1) var(q) else 0
+  tvar <- ubar + (1 + 1/m)*b
+  list(qbar = qbar, se = sqrt(tvar))
+}
+
+# 4.2 Derive within-imputation from CIs 
+.se_from_ci <- function(lo, hi) (hi - lo) / (2*1.96)
+
+safe_log <- function(x) log(pmax(x, .Machine$double.eps))
+
+# 4.3 Pool risks, RD, RR at each tau
+pool_effects <- function(res_list_outcome, scale_to_percentage = TRUE){
+  all <- do.call(rbind, lapply(seq_along(res_list_outcome), function(i){
+    cbind(res_list_outcome[[i]], imp = i)
+  }))
+  
+  # 4.4 Scaling: 100 for %, 1 for decimals    
+  mult <- if(scale_to_percentage) 100 else 1
+  
+  # 4.5 Split by tau(10, 20, 25, or 30)    
+  do.call(rbind, lapply(split(all, all$tau), function(dat_i){
+    # Risk0
+    se_r0 <- .se_from_ci(dat_i$CI_R0_low, dat_i$CI_R0_high)
+    pr0   <- .pool_scalar(dat_i$Risk0, se_r0^2)
+    
+    # Risk1
+    se_r1 <- .se_from_ci(dat_i$CI_R1_low, dat_i$CI_R1_high)
+    pr1   <- .pool_scalar(dat_i$Risk1, se_r1^2)
+    
+    # RD
+    se_rd <- .se_from_ci(dat_i$CI_RD_low, dat_i$CI_RD_high)
+    prd   <- .pool_scalar(dat_i$RD, se_rd^2)
+    
+    # RR 
+    se_lrr <- .se_from_ci(safe_log(dat_i$CI_RR_low), safe_log(dat_i$CI_RR_high))
+    plrr   <- .pool_scalar(safe_log(dat_i$RR), se_lrr^2)
+    
+    
+    data.frame(
+      tau = dat_i$tau[1],
+      Risk0 = pr0$qbar*mult,
+      Risk0_lo = pmax(0, pr0$qbar - 1.96*pr0$se)*mult,
+      Risk0_hi = pmin(1, pr0$qbar + 1.96*pr0$se)*mult,
+      
+      Risk1 = pr1$qbar*mult,
+      Risk1_lo = pmax(0, pr1$qbar - 1.96*pr1$se)*mult,
+      Risk1_hi = pmin(1, pr1$qbar + 1.96*pr1$se)*mult,
+      
+      RD = prd$qbar*mult,
+      RD_lo = (prd$qbar - 1.96*prd$se)*mult,
+      RD_hi = (prd$qbar + 1.96*prd$se)*mult,
+      
+      RR = exp(plrr$qbar),
+      RR_lo = exp(plrr$qbar - 1.96 * plrr$se),
+      RR_hi = exp(plrr$qbar + 1.96 * plrr$se)
+    )
+  }))
+}
+
+# 4.6 Apply to each outcome for each comparison
+# ART vs Infertility
+pooled_g1 <- lapply(res_all_w1, pool_effects)  
+pooled_winsorized1 <- lapply(res_winsorized_1, pool_effects)  
+
+# Infertility vs no Infertility fully-adjusted
+pooled_g2 <- lapply(res_all_w2, pool_effects)  
+pooled_winsorized2 <- lapply(res_winsorized_2, pool_effects) 
+
+# Infertility vs no Infertility age-adjusted
+pooled_g3 <- lapply(res_all_w3, pool_effects)  
+pooled_winsorized3 <- lapply(res_winsorized_3, pool_effects) 
+
+# ICSI vs Infertility (Supplemental analysis)
+pooled_g4 <- lapply(res_all_w4, pool_effects)  
+pooled_winsorized4 <- lapply(res_winsorized_4, pool_effects) 
+
+
+
+# save
+saveRDS(pooled_g1, "pooled_g1.rds")
+saveRDS(pooled_winsorized1, "pooled_w1.rds")
+
+saveRDS(pooled_winsorized2, "pooled_w2.rds")
+saveRDS(pooled_g2, "pooled_g2.rds")
+
+saveRDS(pooled_winsorized3, "pooled_w3.rds")
+saveRDS(pooled_g3, "pooled_g3.rds")
+
+saveRDS(pooled_winsorized4, "pooled_w4.rds")
+saveRDS(pooled_g4, "pooled_g4.rds")
+
+
+
+stack_results <- function(pooled_list, 
+                          label){
+  do.call(rbind, lapply(names(pooled_list), function(name){
+    dat_i <- pooled_list[[name]]
+    dat_i$outcome <- name
+    dat_i$group   <- label
+    return(dat_i)
+  }))
+}
+
+# 4.7 Create the final table
+all_results <- rbind(
+  stack_results(pooled_g1, "Group_1"),
+  stack_results(pooled_winsorized1, "winsor_1"),
+  stack_results(pooled_g2, "Group_2"),
+  stack_results(pooled_winsorized2, "winsor_2"),
+  stack_results(pooled_g3, "Group_3"),
+  stack_results(pooled_winsorized3, "winsor_3"),
+  stack_results(pooled_g4, "Group_4"),
+  stack_results(pooled_winsorized4, "winsor_4")
+)
+
+# 4.8 Sort and clean up column order
+all_results <- all_results %>%
+  select(group, outcome, tau, everything()) %>%
+  arrange(group, outcome, tau) %>%
+  mutate(across(where(is.numeric) & !tau, ~ round(.x, 2)))
+view(all_results)
+
+# 4.9 Save
+write.csv(all_results, "08_S_Table_5_to_7_Risks.csv", row.names = FALSE)
