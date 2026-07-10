@@ -1,0 +1,516 @@
+
+#==============================================================================
+# FILENAME: 10_Figures_ICSI_S8_Fig.R
+# PROJECT:Cardiovascular diseases in women after fertility treatments
+#         and infertility: a cohort study.
+# PURPOSE: the purpose of this file code is to run the survival analyses
+#          for the ICSI supplemental analysis, pool them, create
+#          and save the graphs S8 Fig.
+# AUTHOR: Angelo Mezzoiuso
+# ROLE:   PhD student and corresponding author
+# SUPERVISOR: Sara Öberg
+# UPDATED: 02/07/2026 	
+# INPUT DATA: dlist_w4
+
+# OUTPUT: S8 Fig
+# R VERSION: 4.3.1
+#==============================================================================
+
+##########################################
+# 0. load dependencies
+##########################################
+library(tidyverse)
+library(haven)
+library(gridExtra)
+library(cowplot)
+library(survival)
+
+
+##########################################
+# 1. load data
+##########################################
+dlist_w4 <- readRDS("g4_winsorized.rds")
+pooled_g4 <- readRDS("pooled_w4.rds")
+
+###################################################################
+# 2. one-time font setup: Arial, large text
+###################################################################
+#Ensure consistent Arial rendering across Window devices and
+#fixes PDF glyphs issues (Dingbats) for publication-ready exports.
+if (.Platform$OS.type == "windows") {
+  windowsFonts(Arial = windowsFont("Arial"))
+}
+
+theme_set(theme_minimal(base_family = "Arial", base_size = 18))
+options(ggplot2.useDingbats = FALSE)
+
+
+##########################################################
+# 3. Global plotting configurations and effect formatters
+##########################################################
+
+#' @description
+#' This code created the formatted effect estimate for the plot
+#' Extracts RR from a result list and format them into a string with confidence intervals
+#' 
+#' @param pooled_eff a named list of data frames containing outcome estimates
+#' @param outcome character string. The names of the specific outcome (eg: acute myocardial infarction)
+#' @param tau numeric. The time point at which to extract the estimate ( 25 years)
+#' @param metric effect estimate 
+#' @param digits integer. Number of decimals requested for the effect estimate
+#' @param prefix turned off
+#' 
+#' @return a character string eg: RR 1.30 (1.10,1.40)
+#' 
+make_eff_text <- function(pooled_eff, outcome, tau = 25, metric = "RR", digits = 2){
+  # Safety: return empty string instead of NULL if data is missing
+  if (!outcome %in% names(pooled_eff)) return("") 
+  
+  df <- pooled_eff[[outcome]]
+  row <- df[df$tau == tau, ]
+  
+  if (nrow(row) != 1) return("") # Safety for missing time points
+  
+  paste0("RR ", sprintf("%.2f", row$RR), " (", 
+         sprintf("%.2f", row$RR_lo), ",", sprintf("%.2f", row$RR_hi), ")")
+}
+
+# Common time grid and outcomes
+grid     <- seq(0, 25, by = 0.5)
+outcomes_g4 <- c("Coronary","Diabetes", "Stroke", "HF","Hemorrhage","Kidney","Aortic")
+
+# The y axis is fixed for each disease, so that for each outcome comparison have the same
+# y axis and are comparable
+ylims <- list(
+  Coronary=c(0,0.05), Diabetes=c(0,0.05), Stroke=c(0,0.05),
+  HF=c(0,0.05), Hemorrhage=c(0,0.05), Kidney=c(0,0.05), Aortic=c(0,0.05)
+)
+
+# Ticks for numbers-at-risk row
+risk_ticks <- c(0, 5, 10, 15, 20, 25)
+
+
+################################################
+# 4. Defining survival estimates extraction
+################################################
+#' @description
+#' The function make_survlist takes the imputed data sets and computes the standardized
+#' survival estimates
+#' 
+#' @param dlist a list of imputed dataframes
+#' @param group_var string. This indicates the comparison group
+#' @param outcome string. The name of the disease
+#' @param times numeric vector. It's the 0-25 year grid defined in section 3
+#' 
+#' @return A list of data frames containing survival and risk estimates. 
+
+make_survlist <- function(dlist, 
+                          group_var, 
+                          outcome, 
+                          times){
+  
+  # dynamically construct variable names from the outcome string
+  tvar <- paste0(outcome, "_time_cens")
+  evar <- paste0(outcome, "_event_cens")
+  
+  # create the formula: Surv(time, event) ~ group
+  fml  <- as.formula(paste0("Surv(", tvar, ",", evar, ") ~ ", group_var)) 
+  
+  lapply(dlist, function(data_imp){
+    # fit: Run the weighted KM model
+    fit <- survfit(fml, 
+                   data = data_imp, 
+                   weights = sw, 
+                   conf.type = "plain")
+    # s: Get summary at specific time points (grid)
+    s   <- summary(fit, times = times, extend = TRUE)
+    
+    grp <- if (is.null(fit$strata)) {
+      rep(paste0(group_var, "=1"), length(s$time)) 
+    } else {
+      rep(names(fit$strata), each = length(s$time)/length(fit$strata))
+    }
+    data.frame(
+      time = s$time, group = grp, surv = s$surv, se = s$std.err, n_risk = s$n.risk,
+      check.names = FALSE
+    )
+  })
+}
+
+
+#########################################
+# 5. Defining Rubin's rule pooling logic 
+#########################################
+#' @description
+#' takes a list of survival estimates from imputed data and returns pooled results
+#' 
+#' @param surv_list A list of data frames from \code{make_survlist}
+#' 
+#' @return a single data frame with pooled survival, variance and confidence intervals.
+#' 
+pool_survlist <- function(surv_list){
+  # combine all the imputations into a single dataset
+  all <- do.call(rbind, lapply(seq_along(surv_list), function(i){
+    x <- surv_list[[i]]; x$group <- as.character(x$group); cbind(x, imp = i)
+  }))
+  
+  # Combine by time and group
+  split_list <- split(all, list(all$time, all$group), drop = TRUE)
+  
+  pooled <- do.call(rbind, lapply(split_list, function(df){
+    df <- df[complete.cases(df$surv, df$se, df$n_risk), ]
+    if (!nrow(df)) return(NULL)
+    
+    m     <- length(unique(df$imp)) # number of imputations
+    q_bar <- mean(df$surv) # pooled estimate (mean of means)
+    u_bar <- mean(df$se^2) # within variance 
+    b     <- if (m > 1) var(df$surv) else 0 # between variance
+    
+    #Rubin's rule: total variance= within_variance( u_bar) + (1+1/number of imputations(m=20) ) * between_variance(b)   
+    t_var <- u_bar + (1 + 1/m)*b
+    data.frame(
+      time = df$time[1],
+      group = df$group[1],
+      surv_mean = q_bar,
+      surv_total_var = t_var,
+      lower = pmax(0, q_bar - 1.96*sqrt(t_var)),
+      upper = pmin(1, q_bar + 1.96*sqrt(t_var)),
+      n_risk = as.numeric(mean(df$n_risk, na.rm = TRUE)),
+      check.names = FALSE
+    )
+  }))
+  rownames(pooled) <- NULL
+  pooled[order(pooled$group, pooled$time), ]
+}
+
+
+############################################################
+# 6. assembly: set the extraction, pooling, and labeling
+############################################################
+#' @description
+#' The function build_pooled_curve is a wrapper that takes the 2 previous functions 
+#' make_survlist and pool_survlist, extracts the survival data from imputed data sets, applies 
+#' Rubin's Rules for pooling, and applies clean factor labels for plotting.
+#' 
+#' @param dlist a list of data frames (the imputed data sets)
+#' @param group_var character, the name of the comparison group
+#' @param outcomes character vector, the name of the diseases
+#' @param grid numeric vector, the time grid of evaluation (from 0 to 25, by 0.5) defined in  step 3
+#' @param labels Character vector, clean labels for the group levels (ICSI, Infertility))
+#' 
+#' @return A named list of data frames, where each element corresponds to an 
+#'         outcome and contains the pooled survival estimates and confidence intervals.
+#' 
+build_pooled_curves_g4 <- function(dlist,
+                                   group_var, 
+                                   outcomes, 
+                                   grid, 
+                                   labels){
+  out <- lapply(outcomes, function(o){
+    # 1. Extraction: call the 'make_survlist' helper from step 4
+    lst    <- make_survlist(dlist, group_var, o, grid)
+    # 2. Pooling: call pool_survlist helper from step 5 to apply Rubin's rule
+    #    to lst produced in the previous line
+    pooled <- pool_survlist(lst)
+    # 3. Formatting: convert group to a factor
+    pooled$group   <- factor(pooled$group,
+                             levels = paste0(group_var, "=", c("1","0")),
+                             labels = labels)
+    
+    # 4. Identification: tag the data frame with the outcome name
+    pooled$outcome <- o
+    pooled
+  })
+  
+  
+  names(out) <- outcomes
+  out
+}
+
+
+#########################################################
+# 7. Plotting helpers 
+#########################################################
+#' @description
+#' The function plot_pooled_curve_g4 defines the characteristics 
+#' to plot each survival curve
+#' 
+#' @param pooled_df a data frame containing pooled survival estimates from \code{pool_survlist}
+#' @param ylim numeric vector defining the y-axis limits
+#' @param letter optional character for panel labeling (eg: "A", "B" etc..)
+#' @param letter_y numeric, vertical position of the panel letter
+#' @param eff_text character string containing the effect estimate (RR)
+#' @param eff_y numeric, vertical position of the effect estimate
+#' 
+#' @return a ggplot object
+#' 
+
+
+get_legend <- function(myggplot){
+  tmp <- ggplotGrob(myggplot)
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+}
+
+plot_pooled_curve_g4 <- function(pooled_df, 
+                                 ylim,
+                                 letter = NULL, 
+                                 letter_y = NULL,
+                                 eff_text = NULL, 
+                                 eff_y = NULL) {
+  # internal helper: vertical positioning
+  #put the effect estimate at 85% of the height of the y axis
+  y_annot <- function(y) if (is.null(y)) 0.85*ylim[2] else y
+  
+  # base plotting layer
+  # 1- surv_mean is plotted to convert survival into cumulative incidence
+  p <- ggplot(pooled_df, aes(time, 1 - surv_mean, color = group, fill = group)) +
+    geom_line(size = 1) +
+    # Shaded confidence intervals 
+    geom_ribbon(aes(ymin = 1 - upper, ymax = 1 - lower), alpha = 0.2, color = NA) +
+    
+    scale_x_continuous(limits = c(0, 25), breaks = seq(0, 25, 5), expand = c(0, 0)) +
+    scale_y_continuous(limits = ylim, expand = c(0, 0)) +
+    scale_color_manual(values = c("orange","blue"), breaks = levels(pooled_df$group)) +
+    scale_fill_manual(values  = c("orange","blue"),  breaks = levels(pooled_df$group)) +
+    labs(x = "Years", y = "Cumulative incidence") +
+    theme_minimal(base_family = "Arial") +
+    theme(
+      panel.grid = element_blank(),
+      axis.line = element_line(),
+      axis.ticks = element_line(),
+      legend.position = "none",
+      text = element_text(family = "Arial")
+    )
+  # conditional annotations:
+  # Adds outcome titles (Plain text, size 2.8, aligned with eff_y)
+  if (!is.null(letter))
+    p <- p + annotate("text", x = 0.5,  y = y_annot(eff_y),
+                      label = letter, fontface = "plain", size = 2.8, hjust = 0)
+  
+  # Adds effect estimates (RR)
+  if (!is.null(eff_text))
+    p <- p + annotate("text", x = 24.5, y = y_annot(eff_y),
+                      label = eff_text, hjust = 1, size = 2.8)
+  
+  p
+}
+
+
+#########################################################
+# 8. Risk table
+#########################################################
+#' @description
+#' the function make_risk_table extracts numbers at risk at specific time 
+#' intervals and formats them into a Grob.
+#' 
+#' @param pooled_df a data frame with pooled estimates
+#' @param group_level character vector (ICSI, Infertility)
+#' @param risk_ticks time frame (from 0 to 25 years by 0.5)
+#' 
+#' @return a grob object representing the risk table
+
+make_risk_table <- function(pooled_df, 
+                            group_levels = NULL,
+                            risk_ticks = seq(0, 25, 5)){
+
+  if (!is.null(group_levels)) {
+    pooled_df$group <- factor(as.character(pooled_df$group), levels = group_levels)
+  } else {
+    pooled_df$group <- factor(as.character(pooled_df$group))
+  }
+  
+  
+  pooled_df$n_risk <- suppressWarnings(as.numeric(pooled_df$n_risk))
+  
+  # build the table rows 
+  out <- do.call(rbind, lapply(levels(pooled_df$group), function(g){
+    
+
+    df_g <- subset(pooled_df, group == g)
+    rows <- if (!nrow(df_g)) rep(NA_real_, length(risk_ticks)) else vapply(
+      risk_ticks, function(tk){
+        idx <- which.min(abs(df_g$time - tk))
+        if (length(idx) == 0L) NA_real_ else as.numeric(df_g$n_risk[idx])
+      }, numeric(1)
+    )
+    
+    nm <- c("Group", as.character(risk_ticks))
+    df_row <- data.frame(Group = g, t(round(rows)), check.names = FALSE)
+    names(df_row) <- nm
+    df_row
+  }))
+  
+  # define the visual theme 
+  tt <- gridExtra::ttheme_minimal(
+    base_family = "Arial",
+    core    = list(fg_params = list(fontfamily="Arial", fontsize = 8, hjust = 0, x = 0),
+                   bg_params = list(fill = NA, col = "grey80")),
+    colhead = list(fg_params = list(fontfamily="Arial", fontsize = 8, hjust = 0, x = 0),
+                   bg_params = list(fill = "grey95", col = "grey80")),
+    rowhead = list(fg_params = list(fontfamily="Arial", fontsize = 8, hjust = 0, x = 0),
+                   bg_params = list(fill = NA, col = "grey80"))
+  )
+  
+  # convert the processed data frame into a Grob
+  tbl <- gridExtra::tableGrob(out, rows = NULL, theme = tt)
+  
+  # Adjust padding
+  tbl$padding <- grid::unit(c(0.5, 1.5, 0.5, 1.5), "mm")
+  tbl
+}
+
+
+#########################################################
+# 9. Align Survival Plot and Risk Table 
+#########################################################
+#' @description
+#' A layout manager that extracts internal plot dimensions to 
+#' physically align a risk table's columns with a ggplot's X-axis.
+#' 
+#' @param pooled_df data frame of pooled survival estimates
+#' @param ylim numeric vector for Y-axis limits
+#' @param group_levels character vector defining the comparison groups
+#' @param letter letter for the panels
+#' @param letter_y y-coordinate for the panel label
+#' @param eff_text effect estimate string 
+#' @param eff_y y-coordinate for the effect text.
+#' 
+#' @return a gtable object containing the aligned plot and table
+#' 
+plot_with_risktable_g4 <- function(pooled_df, ylim, group_levels, letter = NULL, eff_text = NULL, eff_y = NULL){
+  
+  # Create the plot 
+  p <- plot_pooled_curve_g4(pooled_df, ylim, letter = letter, eff_text = eff_text, eff_y = eff_y) +
+    theme(
+      plot.margin = margin(0, 0, 0, 0),
+      panel.border = element_rect(colour = "grey70", fill = NA, size = 0.5),
+      axis.title.x = element_text(margin = margin(t = 5, b = 2))
+    )
+  
+  # Generate the risk table 
+  tbl <- make_risk_table(pooled_df, group_levels, risk_ticks = seq(0, 25, 5))
+  
+  gp <- ggplotGrob(p)
+  pnl_col <- gp$layout[gp$layout$name == "panel", "l"][1]
+  left_w  <- sum(gp$widths[1:(pnl_col - 1)]) 
+  panel_w <- gp$widths[pnl_col]
+  
+  n_cols <- length(tbl$widths)
+  if (n_cols >= 2) {
+    tbl$widths[1] <- left_w
+    tbl$widths[2:n_cols] <- rep(panel_w / (n_cols - 1), n_cols - 1)
+  }
+  
+  combined_grob <- gridExtra::arrangeGrob(
+    grid::nullGrob(),      # Spacer Top 
+    gp,                    # The Survival Plot
+    grid::nullGrob(),      # Spacer Middle 
+    tbl,                   # The Risk Table
+    ncol = 1, 
+    heights = grid::unit.c(
+      grid::unit(3, "mm"), 
+      grid::unit(1, "null"), 
+      grid::unit(4, "mm"), # Increased middle spacer
+      grid::unit(1.2, "cm") 
+    )
+  )
+  
+  
+  grid::grobTree(combined_grob, vp = grid::viewport(width = 0.92, height = 0.96))
+}
+
+#####################
+# 10. Build curves 
+#####################
+#' @description
+#' This step uses the function build_pooled_curves_g4 
+#' and generates 7 outcomes
+#' 
+# Comparison: ICSI vs Infertility
+curves_g4 <- build_pooled_curves_g4(dlist = dlist_w4, 
+                                    group_var = "Group_3", 
+                                    outcomes = outcomes_g4, 
+                                    grid = grid,
+                                    labels = c("ICSI","Infertility"))
+
+
+###########################################
+#11. Save
+############################################
+save_group_bundle_g4 <- function(curves_list, ylims_list, pooled_eff_list, group_levels, file_name, analysis_type) {
+  
+  target_outcomes <- c("Coronary", "Diabetes","Stroke", "HF", "Hemorrhage", "Kidney", "Aortic")
+  
+  outcome_titles <- c(
+    "Coronary"   = "Acute myocardial infarction",
+    "Diabetes"   = "Type 2 diabetes mellitus",
+    "Stroke"     = "Cerebral ischemic conditions",
+    "HF"         = "Heart failure",
+    "Hemorrhage" = "Intracranial Hemorrhage",
+    "Kidney"     = "Chronic kidney disease",
+    "Aortic"     = "Aortic aneurysm or dissection"
+  )
+  
+  #  Build the 7 plot grobs
+  plots_to_bundle <- lapply(seq_along(target_outcomes), function(i) {
+    oc <- target_outcomes[i]
+    plot_with_risktable_g4(
+      pooled_df    = curves_list[[oc]],
+      ylim         = ylims_list[[oc]],
+      group_levels = group_levels,
+      letter       = outcome_titles[[oc]],
+      eff_text     = make_eff_text(pooled_eff_list, oc, tau = 25),
+      eff_y        = 0.85 * ylims_list[[oc]][2]
+    )
+  })
+  
+  # Extract Shared Legend
+  leg_data <- curves_list[[1]]
+  temp_p <- ggplot(leg_data, aes(x = time, y = (1 - surv_mean), color = group)) +
+    geom_line(size = 1) +
+    scale_color_manual(values = c("orange", "blue"), labels = group_levels, name = "Group") +
+    theme_minimal(base_family = "Arial") +
+    theme(legend.text = element_text(size = 9), legend.title = element_text(size = 9, face = "bold"))
+  
+  shared_legend <- get_legend(temp_p)
+  
+  
+  plots_to_bundle[[8]] <- shared_legend 
+  
+  # Save to tiff
+  file_path <- paste0(file_name, ".tif")
+  tiff(filename = file_path, width = 8.5, height = 14, units = "in", 
+       res = 300, compression = "lzw", type = "windows", family = "Arial")
+  
+  gridExtra::grid.arrange(
+    grobs = plots_to_bundle, 
+    ncol  = 2, 
+    nrow  = 4
+  )
+  
+  dev.off()
+}
+#########################################################
+# 12. execution
+#########################################################
+
+# build pooled curves for ICSI vs Infertility
+curves_g4 <- build_pooled_curves_g4(
+  dlist     = dlist_w4, 
+  group_var = "Group_3", 
+  outcomes  = outcomes_g4, 
+  grid      = grid, 
+  labels    = c("ICSI", "Infertility")
+)
+
+# save
+save_group_bundle_g4(
+  curves_list     = curves_g4,
+  ylims_list      = ylims,
+  pooled_eff_list = pooled_g4,
+  group_levels    = c("ICSI", "Infertility"),
+  file_name       = "S8_Fig",
+  analysis_type   = "Fully-weighted ICSI vs Infertility"
+)
