@@ -1,0 +1,285 @@
+
+# Long-term risk of cardiovascular disease after assisted reproductive technology and infertility: a cohort study
+#
+# Program: 04_Multiple_imputation_and_subsetting ;
+# Author:   Angelo Mezzoiuso ;
+# Role: PhD student and corresponding author;
+# Supervisor: Sara Öberg;
+# Date of last update:   2026-07-01 ;
+# Purpose: Handle the missing records in the Model1 dataset with 
+#          multiple imputation and subset in relation to the
+#          3 comparison groups
+#               
+# Input:   Model1
+#Output:   dlist_g1_preIPW (ART vs Infertility)
+#          dlist_g2_preIPW (Infertility vs no Infertility)
+#          dlist_g3_preIPW (Sensitivity Analysis: ICSI vs Infertility)
+#         
+#
+# USAGE: Take the model1 datafile and does the following:
+#        1) multiply impute the missing covariates
+#        2) quality checks for the imputations
+#        3) subset 3 datasets in relation to
+#           the different comparison groups.
+
+# R VERSION: 4.3.1
+
+#Code for multiply imputing and subsetting.
+#-----------------------------------------------------------------------;
+
+
+#########################################################
+# 0. LOADING DEPENDENCIES
+#########################################################
+library(cowplot)
+library(grid)
+library(gridExtra)
+library(gridGraphics)
+library(haven)
+library(lattice)
+library(mice)
+library(miceadds)
+library(micemd)
+library(future)
+library(tidyverse)
+
+
+#########################################################
+# 1. IMPORTING the dataset
+#########################################################
+
+model1 <- read_sas("Path..", NULL)
+
+
+
+################################
+# 2. DATASET PREPARATION
+################################
+
+# 2.0 create a list of variables to transform into factors
+variables <- c("SEI","Education","Smoke","Maternal_Country",
+               "Group_1","Group_2","Group_3","Group_4", "ASTMA",
+               "DIABETES", "HYPERTON", "NJURSJUK", 
+               "SLE", "ULCOLIT", "EPILEPSI")
+
+# 2.1 transform the missing into NA and the variables in factors
+model1 <- model1 %>%
+  mutate(across(all_of(variables), ~ na_if(.x, ""))) %>% # Convert "" to NA
+  mutate(across(all_of(variables), as.factor))          # Then convert to factor
+
+
+# 2.2 list of 5 diseases to pull together (except astma and ulcolit that will be separate variables in the model)
+to_pool <- c("DIABETES", "HYPERTON", "NJURSJUK", 
+             "SLE", "EPILEPSI")
+
+# 2.3 pool all diseases except ASTMA and ULCOLIT into a factor variable
+model1 <- model1 %>%
+  mutate(pooled_diseases = if_any(all_of(to_pool), ~ .x == "1")) %>%
+  mutate(pooled_diseases = factor(as.numeric(pooled_diseases), levels = c(0, 1)))
+
+
+# 2.4 convert the followup from years to months 
+model1$Hemorrhage_followup <- round(model1$Hemorrhage_followup / 12, 1)
+model1$Stroke_followup     <- round(model1$Stroke_followup / 12, 1)
+model1$Coronary_followup   <- round(model1$Coronary_followup / 12, 1)
+model1$Diabetes_followup   <- round(model1$Diabetes_followup / 12, 1)
+model1$HF_followup         <- round(model1$HF_followup / 12, 1)
+model1$Kidney_followup     <- round(model1$Kidney_followup / 12, 1)
+model1$Aortic_followup     <- round(model1$Aortic_followup / 12, 1)
+
+
+
+# 2.5 keep only necessary variables
+model1_selected <- model1[c("Hemorrhage_followup", "Hemorrhage_event", "Stroke_followup", 
+                            "Stroke_event", "Coronary_followup", "Coronary_event", "Diabetes_followup", 
+                            "Diabetes_event", "HF_followup", "HF_event", "Kidney_followup", 
+                            "Kidney_event", "Aortic_followup", "Aortic_event", "Maternal_Country", 
+                            "Smoke", "Education", "Entry_age","BMI","SEI","AR","Group_1","Group_2",
+                            "Group_3","Group_4", "ASTMA", "ULCOLIT", "pooled_diseases")]
+
+
+# 2.6 round BMI to one decimal
+model1$BMI <- round(as.numeric(model1$BMI),1)
+
+
+
+###############################
+# 3. MULTIPLE IMPUTATION
+###############################
+
+# 3.1 Keep only needed variables for imputation
+to_impute <- c("BMI","SEI","Education","Smoke","Maternal_Country")
+keep_vars <- c(to_impute, "AR","Entry_age","Coronary_event","Coronary_followup",
+               "Group_1", "Group_2","Group_3","Group_4","Diabetes_event",
+               "Diabetes_followup","Stroke_event","Stroke_followup","HF_event",
+               "HF_followup","Hemorrhage_event","Hemorrhage_followup",
+               "Kidney_followup","Kidney_event","Aortic_followup","Aortic_event",
+               "ASTMA", "ULCOLIT", "pooled_diseases")
+
+imp_data  <- model1_selected[, keep_vars]
+
+
+# 3.2 Define imputation methods
+meth <- make.method(imp_data); meth[] <- ""
+meth["BMI"]            <- "pmm"
+meth["SEI"]              <- "polr"
+meth["Education"]        <- "polr"   
+meth["Smoke"]            <- "logreg"
+meth["Maternal_Country"] <- "logreg"
+meth[c("AR","Entry_age","Coronary_event","Coronary_followup","Group_1",
+       "Group_2", "Group_3","Group_4","Diabetes_event","Diabetes_followup",
+       "Stroke_event","Stroke_followup", "HF_event","HF_followup",
+       "Hemorrhage_event","Hemorrhage_followup","Kidney_followup",
+       "Kidney_event","Aortic_followup","Aortic_event","ASTMA", "ULCOLIT", 
+       "pooled_diseases")] <- ""  # never impute
+
+# 3.3 Define predictor matrix
+pred <- make.predictorMatrix(imp_data); pred[,] <- 0
+pred[to_impute, to_impute] <- 1
+pred[to_impute, c("AR","Entry_age","Group_1",
+                  "Group_2","Group_3","Group_4")] <- 1
+
+# 3.4 Run multiple imputation in parallel 
+plan(multisession, workers = max(1, parallel::detectCores() -1))
+
+# 3.5 create a vector of 20 unique seeds
+m_imputations <- 20
+my_parallel_seeds <- 123 + (1:m_imputations)
+
+imp <- futuremice(
+  data            = imp_data,
+  m               = m_imputations,
+  maxit           = 10,
+  method          = meth, 
+  predictorMatrix = pred,
+  parallelseeds   = my_parallel_seeds,
+  n.cores         = max(1, parallel::detectCores()-1),
+)
+
+# 3.6 Creation of the multiply imputed datasets
+dlist <- complete(imp, action = "all")
+
+# 3.7 Save the imputed dataframe
+# Save the 'dlist' object to a file
+saveRDS(dlist, file = "my_imputed_data_list.rds")
+
+# 3.8 If I need to retrieve it
+dlist <- readRDS("my_imputed_data_list.rds")
+
+
+
+
+
+#################################################################
+# 4. QUALITY CHECKS FOR THE MULTIPLY IMPUTED VARIABLES
+#################################################################
+
+
+# 4.1 Convergence (Trace Plots)
+# For all the imputed variables, it tracks the mean/SD of the imputations
+a <- plot(imp, BMI + SEI + Education + Smoke + Maternal_Country ~ .it | .ms, 
+          layout = c(2, 5), 
+          main = "Convergence Trace Plots")
+
+# 4.2 Diagnostics for continuous variables imputed (Density plot for BMI only)
+b <- densityplot(imp, ~BMI, main = "Density: Observed (Blue) vs Imputed (Red)")
+
+# 4.3 Stripplot for BMI (checks for outliers/impossible values)
+c <- stripplot(imp, BMI ~ .imp, pch = 20, cex = 0.8, 
+               main = "BMI Spread across 20 Imputations")
+
+# 4.4 Diagnostics for categorical variables (all Imputations)
+cat_vars <- c("SEI", "Education", "Smoke", "Maternal_Country")
+
+lapply(cat_vars, function(v) {
+  cat("\n--- Proportions Check for:", v, "---\n")
+  
+  # Observed proportions
+  obs_prop <- prop.table(table(imp$data[[v]]))
+  
+  # Mean imputed proportions across all 20 datasets
+  # Extract the variable from all 20 datasets and get proportions
+  all_imp_props <- sapply(1:20, function(m) {
+    prop.table(table(complete(imp, m)[[v]]))
+  })
+  
+  # Calculate the row means
+  mean_imp_prop <- rowMeans(all_imp_props)
+  
+  df_comp <- data.frame(
+    Observed = as.numeric(obs_prop), 
+    Imputed_Mean = as.numeric(mean_imp_prop)
+  )
+  
+  rownames(df_comp) <- names(obs_prop)
+  print(round(df_comp, 3))
+})
+
+
+# 4.5 Helper function to add the "A", "B", "C" labels
+# This places the label in the top-left corner of each grob
+add_label <- function(plt, label) {
+  arrangeGrob(plt, top = textGrob(label, x = unit(0, "npc"), y = unit(1, "npc"),
+                                  just = c("left", "top"), 
+                                  gp = gpar(fontsize = 18, fontface = "bold")))
+}
+
+# 4.6 Wrap the plots with labels
+p1_labeled <- add_label(a, "A")
+p2_labeled <- add_label(b, "B")
+p3_labeled <- add_label(c, "C")
+
+# 4.7 Open the PNG device
+png("Figure_MI_Quality_Checks_Final.png", 
+    width = 8.5, height = 14, units = "in", res = 600)
+
+# 4.8 Arrange them vertically
+grid.arrange(p1_labeled, p2_labeled, p3_labeled, 
+             ncol = 1, 
+             heights = c(2, 1, 1))
+
+# 4.9 Close
+dev.off()
+getwd()
+
+
+
+
+#################################################################
+# 5. CREATE SUBSET DATASETS IN RELATION TO THE COMPARISON GROUPS
+#################################################################
+
+
+# 5.1 Here I create the subset for comparison of ART vs Infertility
+dlist_g1 <- lapply(dlist, function(df){
+  df <- df[!is.na(df$Group_2), , drop = FALSE]
+  df$Group_2 <- factor(df$Group_2, levels = c(0,1))
+  df
+})
+
+# 5.2 Here I create the subset for comparison of Infertility vs no Infertility
+dlist_g2 <- lapply(dlist, function(df){
+  df <- df[!is.na(df$Group_4), , drop = FALSE]
+  df$Group_4 <- factor(df$Group_4, levels = c(0,1))
+  df
+})
+
+# 5.3 Here I create the subset for comparison ICSI vs Infertility
+dlist_g3 <- lapply(dlist, function(df){
+  df <- df[!is.na(df$Group_3), , drop = FALSE]
+  df$Group_3 <- factor(df$Group_3, levels = c(0,1))
+  df <- df[df$AR > 1993, , drop = FALSE]
+  df
+})
+
+
+
+
+####################################
+# 6. SAVE THE SUB-DATASETS
+####################################
+
+# Save each subgroup list before IPW
+saveRDS(dlist_g1, "dlist_g1_preIPW.rds")
+saveRDS(dlist_g2, "dlist_g2_preIPW.rds")
+saveRDS(dlist_g3, "dlist_g3_preIPW.rds")
